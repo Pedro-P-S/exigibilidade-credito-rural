@@ -5,3 +5,7 @@
 !exigibilidade.py
 !docs/
 !docs/prompt-gpt.md
+!GLOSSARY.md
+!coding-standards.md
+!docs/adr/
+!docs/adr/*.md
