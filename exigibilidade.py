@@ -9,6 +9,7 @@ Comandos:
   python exigibilidade.py exemplo                        gera entradas inventadas em exemplo/ e roda tudo
   python exigibilidade.py rodar PASTA_ENTRADAS --data-base AAAA-MM-DD [--tipo-if banco|cooperativa] [--rodada NOME]
   python exigibilidade.py comparar RODADA_A RODADA_B [--mes AAAA-MM]   (pastas ou saldo_operacoes.csv)
+  python exigibilidade.py validar RODADA ARQUIVO_SISEX  (colunas posicao, codigo, valor)
   python exigibilidade.py estrutura ARQUIVO_OU_PASTA [...] [--mascarar "NOME1,NOME2"]
 
 Sem argumentos (F5 no Spyder) abre um menu. Saídas em saidas/ ao lado do script. Só biblioteca padrão
@@ -24,21 +25,388 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.2.0"
+VERSAO = "0.3.0"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
 DEDUCAO = 500_000_000  # MCR 6-2-2 e 6-7-4
 ISENCAO = 10_000_000   # MCR 6-2-5 e 6-7-6
 
-# categoria de cada saldo, por fonte (o que ela cumpre e qual limite tem)
-CATEGORIAS = {
-    "RO": {"pronaf", "pronaf_ind_com", "pronamp", "pronamp_invest", "pronamp_peq_medio",
-           "demais", "demais_abc", "demais_pca"},
-    "POUP": {"credito_rural", "cpr"},
-    "LCA": {"credito_rural", "faculdade"},
-    "LIVRE": {"livre"},
+FONTES = ("RO", "POUP", "LCA", "LIVRE")  # LIVRE: não cumpre exigibilidade, fica fora
+FONTE_DO_CODIGO = {"3.1": "RO", "3.2": "POUP", "3.3": "LCA"}  # anexos II, III e IV
+
+# Códigos de limite do Documento 6: código -> (anexo, onde soma, base do limite, %, para onde vai o excesso, texto).
+# Texto de cada um no MCR (descrição do código): os códigos que o compõem estão na coluna "cat" de REGRAS_TXT.
+LIMITES = {
+    "3.1.13.48-2": ("RO", "ap_pronaf", "sub_pronaf", 0.10, None, "Ind./com. Pronaf até 10% de 2.1.00.20-7"),
+    "3.1.12.09-8": ("RO", "ap_pronaf", "sub_pronaf", 0.40, None, "Res. 5.330 Pronaf até 40% de 2.1.00.20-7"),
+    "3.1.41.39-9": ("RO", "ap_pronamp", "sub_pronamp", 0.10, None, "Investimento Pronamp até 10% de 2.1.00.30-0"),
+    "3.1.40.34-5": ("RO", "ap_pronamp", "sub_pronamp", 0.10, "ap_geral", "Peq./médios produtores até 10% de 2.1.00.30-0"),
+    "3.1.40.38-3": ("RO", "ap_pronamp", "sub_pronamp", 0.40, None, "Res. 5.330 Pronamp até 40% de 2.1.00.30-0"),
+    "3.1.30.87-4": ("RO", "ap_geral", "geral", 0.036, None, "ABC+/RenovAgro até 3,6% de 2.1.00.40-3"),
+    "3.1.30.89-8": ("RO", "ap_geral", "geral", 0.024, None, "PCA até 2,4% de 2.1.00.40-3"),
+    "3.1.32.01-6": ("RO", "ap_geral", "geral", 0.40, None, "Res. 5.330 até 40% de 2.1.00.40-3"),
+    "3.1.30.53-7": ("RO", "ap_geral", "propria", 0.60, None, "Res. 2.238 até 60% de 2.1.10.00-8"),
+    "3.2.10.54-3": ("POUP", "ap_cr", "exig_liquida", 0.075, None, "Res. 4.259 custeio até 7,5% de 2.2.50.00-9"),
+    "3.2.10.72-5": ("POUP", "ap_cr", "exig_liquida", 0.015, None, "Res. 4.259 investimento até 1,5% de 2.2.50.00-9"),
+    "3.2.20.29-6": ("POUP", "ap_cr", "exig_total", 0.10, None, "Res. 5.247 até 10% de 2.2.00.00-4"),
+    "3.2.30.10-7": ("POUP", "ap_cpr", "propria", 0.05, None, "CPR até 5% de 2.2.10.00-1"),
+    "3.3.20.17-2": ("LCA", "ap_cr", "sub", 0.20, None, "Res. 5.247 inc. I até 20% de 2.3.00.10-0"),
+    "3.3.40.09-7": ("LCA", "ap_fac", "faculdade", 0.22, None, "Res. 5.247 inc. II/III até 22% de 2.3.00.20-3"),
 }
+# onde soma cada categoria sem limite
+BALDE = {"RO": {"pronaf": "ap_pronaf", "pronamp": "ap_pronamp", "demais": "ap_geral"},
+         "POUP": {"credito_rural": "ap_cr"}, "LCA": {"credito_rural": "ap_cr", "faculdade": "ap_fac"}}
+
+# Regras operação -> código do Documento 6, tiradas do título de cada código de aplicação dos anexos II, III e IV
+# (MCR Atualização nº 760). tipo: i = a instituição informa, c = o Sisex calcula (Doc 6, Anexo I, 12.1).
+# cat: o limite que o código compõe (descrição do código de limite) ou a subexigibilidade da seção.
+# de/ate: período de contratação; taxa_max/taxa_min: % a.a.; fator e ponderador: seção 4 do anexo
+# ("Ponderação ... Valor correspondente a N% da média do saldo informado no código X" -> fator 1 + N%).
+REGRAS_TXT = """\
+3.1.13.08-0;i;pronaf;pronaf;custeio;2018-07-01;2019-06-30;;;;produtor;mcr_10_4_2_a;1.38;4.1.34.04-4;Operações de custeio de que trata o MCR 10-4-2-“a” - contratadas de 1/7/2018 a 30/6/2019.
+3.1.13.09-7;i;pronaf;pronaf;custeio;2018-07-01;2019-06-30;;;;produtor;mcr_10_4_2_b;1.15;4.1.34.05-1;Operações de custeio de que trata o MCR 10-4-2-“b” - contratadas de 1/7/2018 a 30/6/2019.
+3.1.13.15-2;i;pronaf;pronaf;;;2018-06-30;2.5;;;produtor;;1.38;4.1.34.07-5;Operações ao amparo do Pronaf com taxa até 2,5% a.a. (MCR 6-2-17-D) - contratadas até 30/6/2018.
+3.1.13.16-9;i;pronaf;pronaf;;;2018-06-30;;2.5;;produtor;;1.15;4.1.34.08-2;Operações ao amparo do Pronaf com taxa superior a 2,5% a.a. (MCR 6-2-17-D) - contratadas até 30/6/2018.
+3.1.13.17-6;i;pronaf;pronaf;custeio;2019-07-01;2020-06-30;;;;produtor;mcr_10_4_2_a;1.16;4.1.34.09-9;Operações de custeio de que trata o MCR 10-4-2-“a” - contratadas de 1/7/2019 a 30/6/2020.
+3.1.13.18-3;i;pronaf;pronaf;custeio;2019-07-01;2020-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2019 a 30/6/2020.
+3.1.13.21-7;i;pronaf;pronaf;investimento;2020-02-01;2020-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronaf - contratadas de 1/2/2020 a 30/6/2020.
+3.1.13.24-8;i;pronaf;pronaf;custeio;2020-07-01;2021-06-30;;;;produtor;mcr_10_4_2_a;1.24;4.1.34.10-9;Operações de custeio de que trata o MCR 10-4-2-“a” - contratadas de 1/7/2020 a 30/6/2021.
+3.1.13.25-5;i;pronaf;pronaf;custeio;2020-07-01;2021-06-30;;;;produtor;mcr_10_4_2_b;1.11;4.1.34.11-6;Operações de custeio de que trata o MCR 10-4-2-“b” - contratadas de 1/7/2020 a 30/6/2021.
+3.1.13.27-9;i;pronaf;pronaf;investimento;2021-03-01;2021-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronaf - contratadas de 1/3/2021 a 30/6/2021.
+3.1.13.29-3;i;pronaf;pronaf;custeio;2021-07-01;2022-06-30;3;;;produtor;;1.4;4.1.34.12-3;Operações de custeio contratadas de 1/7/2021 a 30/6/2022 com taxa de até 3% a.a. - Res. nº 4.928/2021.
+3.1.13.30-3;i;pronaf;pronaf;custeio;2021-07-01;2022-06-30;4.5;;;produtor;;1.16;4.1.34.13-0;Operações de custeio contratadas de 1/7/2021 a 30/6/2022 com taxa de até 4,5% a.a. - Res. nº 4.928/2021.
+3.1.13.31-0;i;pronaf;pronaf;custeio;2021-07-01;2022-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2021 a 30/6/2022.
+3.1.13.33-4;i;pronaf;pronaf;custeio;2022-07-01;2023-06-30;5;;;produtor;;1.57;4.1.34.14-7;Operações de custeio contratadas de 1/7/2022 a 30/6/2023 com taxa de até 5% a.a. - Res. nº 5.028/2022.
+3.1.13.34-1;i;pronaf;pronaf;custeio;2022-07-01;2023-06-30;6;;;produtor;;1.38;4.1.34.15-4;Operações de custeio contratadas de 1/7/2022 a 30/6/2023 com taxa de até 6% a.a. - Res. nº 5.028/2022.
+3.1.13.35-8;i;pronaf;pronaf;custeio;2022-07-01;2023-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2022 a 30/6/2023.
+3.1.13.36-5;i;3.1.13.48-2;pronaf;industrializacao;2022-07-01;2023-06-30;;;;produtor;;;;Operações de industrialização - contratadas de 1/7/2022 a 30/6/2023.
+3.1.13.37-2;i;pronaf;pronaf;custeio;2023-07-01;2024-06-30;4;;;produtor;;1.26;4.1.34.16-1;Operações de custeio - contratadas de 1/7/2023 a 30/6/2024 com taxa de até 4% a.a. - Res. n° 5.087/2023.
+3.1.13.38-9;i;pronaf;pronaf;custeio;2023-07-01;2024-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2023 a 30/6/2024.
+3.1.13.39-6;i;3.1.13.48-2;pronaf;industrializacao;2023-07-01;2024-06-30;;;;produtor;;;;Operações de industrialização - contratadas de 1/7/2023 a 30/6/2024.
+3.1.13.40-6;i;pronaf;pronaf;custeio;2024-07-01;2025-06-30;3;;;produtor;;1.37;4.1.34.17-8;Operações de custeio - contratadas de 1/7/2024 a 30/6/2025 com taxa de até 3% a.a. - Res. n° 5.170/2024.
+3.1.13.41-3;i;pronaf;pronaf;custeio;2024-07-01;2025-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2024 a 30/6/2025.
+3.1.13.42-0;i;3.1.13.48-2;pronaf;industrializacao;2024-07-01;2025-06-30;;;;produtor;;;;Operações de industrialização - contratadas de 1/7/2024 a 30/6/2025.
+3.1.13.43-7;c;pronaf;pronaf;custeio;2025-07-01;2026-06-30;3;;;produtor;;1.37;4.1.34.18-5;Operações de custeio contratadas de 1/7/2025 a 30/6/2026 com taxa de até 3% a.a. - Res. n° 5.170/2024.
+3.1.13.44-4;c;pronaf;pronaf;custeio;2025-07-01;2026-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2025 a 30/6/2026.
+3.1.13.46-8;c;3.1.13.48-2;pronaf;industrializacao;2026-07-01;2027-06-30;;;;produtor;;;;Operações de industrialização - MCR 10-11 - contratadas de 1/7/2026 a 30/6/2027.
+3.1.13.47-5;c;3.1.13.48-2;pronaf;comercializacao;2026-07-01;2027-06-30;;;;produtor;;;;Operações de comercialização - MCR 10-11 - contratadas de 1/7/2026 a 30/6/2027.
+3.1.13.49-9;c;pronaf;pronaf;custeio;2026-07-01;2027-06-30;3;;;produtor;;1.37;4.1.34.19-2;Operações de custeio contratadas de 1/7/2026 a 30/6/2027 com taxa de até 3% a.a. - Res. nº 5.170/2024.
+3.1.13.50-9;c;pronaf;pronaf;custeio;2026-07-01;2027-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2026 a 30/6/2027.
+3.1.10.51-9;i;pronaf;pronaf;;;;;;;produtor;proagro;;;Proagro - Ressarcimentos pendentes vinculados ao Pronaf (MCR 6-2).
+3.1.10.52-6;i;pronaf;pronaf;;;;;;;produtor;excluida_subvencao;;;Financiamentos rurais excluídos da base da subvenção do Tesouro Nacional (TN), concedidos a beneficiários do Pronaf (MCR 6-2).
+3.1.10.54-0;i;pronaf;pronaf;;;;;;;produtor;outras_fontes;;;Operações contratadas originalmente com recursos de outras fontes, com beneficiários do Pronaf (MCR 6-2).
+3.1.11.48-4;i;pronaf;pronaf;;;;;;;produtor;renegociacao;;;Renegociação de dívidas de operações de crédito rural contratadas no âmbito do Pronaf - Outras.
+3.1.11.50-1;i;pronaf;pronaf;custeio;;;;;;produtor;res_4801;;;Operações de custeio vinculadas ao Pronaf - Res. nº 4.801/2020.
+3.1.11.97-2;i;pronaf;pronaf;custeio;;;;;;produtor;renegociacao_4802;;;Renegociação de operações de custeio vinculadas ao Pronaf - Res. nº 4.802/2020.
+3.1.12.04-3;i;pronaf;pronaf;custeio;;;;;;produtor;res_4802;;;Operações de custeio vinculadas ao Pronaf - Res. nº 4.802/2020.
+3.1.13.45-1;i;pronaf;pronaf;;;;;;;produtor;desclassificada;;;Operações desclassificadas parcialmente, contratadas no âmbito do Pronaf.
+3.1.12.08-1;c;3.1.12.09-8;pronaf;;;;;;;produtor;res_5330;;;Operações de crédito rural, contratadas no âmbito do Pronaf - Resolução CMN nº 5.330/2026.
+3.1.30.14-2;i;demais;demais;custeio;;;;;;produtor;avicultura_suinocultura_piscicultura;;;Custeio - Avicultura, suinocultura e piscicultura.
+3.1.30.35-5;i;demais;demais;comercializacao;;;;;;produtor;;;;Operações de comercialização, exceto as de desconto de DR e de NPR representativas da comercialização de leite e FGPP.
+3.1.30.38-6;i;demais;demais;investimento;2013-07-01;2014-06-30;;;;produtor;invest_acima_300mil;1.25;4.1.32.21-1;Operações de investimento com valor superior a R$300.000,00, nos termos do MCR 6-2-11-“b” - Exigibilidade Própria - Contratadas de 1/7/2013 a 30/6/2014 (MCR 6-2-2 e 6-2-11-“b”).
+3.1.30.42-7;i;demais;demais;investimento;;2017-06-30;;;;produtor;pecuario;;;Operações de investimento pecuário - contratadas até 30/6/2017.
+3.1.30.43-4;i;demais;demais;comercializacao;;;;;;produtor;desconto_leite;;;Operações de desconto representativas da comercialização de leite.
+3.1.30.45-8;i;demais;demais;custeio;;;;;;produtor;;;;Operações de custeio.
+3.1.30.46-5;i;demais;demais;investimento;;2017-06-30;;;;produtor;;;;Operações de investimento - contratadas até 30/6/2017.
+3.1.30.67-8;i;demais;demais;industrializacao;;;;;;produtor;;;;Operações de industrialização.
+3.1.30.49-6;i;demais;demais;investimento;2014-07-01;2015-06-30;;;;produtor;mcr_6_2_17_b;1.25;4.1.33.84-9;Operações de investimento contratadas nos termos do MCR 6-2-17-“b” - Exigibilidade Própria - Contratadas de 1/7/2014 a 30/6/2015 (MCR 6-2-3 e 6-2-17-“b”).
+3.1.20.15-2;i;demais;demais;investimento;;2011-06-30;;;;produtor;invest_ate_200mil;1.1;4.1.20.10-6;Aplicações em investimento com valor de até R$200.000,00 - Demais operações (MCR 3-3-14 e 6-2-7- A) - contratadas até 30/6/2011.
+3.1.21.00-3;i;demais;demais;investimento;2011-07-01;2012-06-30;;;;produtor;invest_ate_300mil;1.1;4.1.40.47-8;Operações de Investimento com valor de até R$300.000,00 - MCR 3-3 - Contratadas de 1/7/2011 a 30/6/2012 (MCR 3-3-14 e 6-2-7-A), contratadas com prazo de reembolso superior a 2 (dois) anos.
+3.1.30.62-3;i;demais;demais;custeio;;;;;;produtor;cultivo_protegido;1.2;4.1.33.92-8;Operações de custeio - Cultivo Protegido (MCR 6-2-17-“a”).
+3.1.30.71-9;i;demais;demais;investimento;2018-07-01;2019-06-30;;;;produtor;bovinos;;;Operações de investimento destinadas à aquisição de bovinos ou bubalinos para reprodução ou cria - contratadas de 1/7/2018 a 30/6/2019 - Res. 4.669/2018.
+3.1.30.86-7;i;3.1.30.87-4;demais;investimento;2021-07-01;2022-06-30;;;;produtor;abc;;;Operações de investimento - Programa ABC - contratadas de 1/7/2021 a 30/6/2022 - Res. 4.917/2021.
+3.1.30.88-1;i;3.1.30.89-8;demais;investimento;2021-07-01;2022-06-30;;;;produtor;pca;;;Operações de investimento - PCA - contratadas de 1/7/2021 a 30/6/2022 - Res. 4.917/2021.
+3.1.30.92-2;i;3.1.30.87-4;demais;investimento;2022-07-01;2023-06-30;;;;produtor;abc;;;Operações de investimento - Programa ABC+ - contratadas de 1/7/2022 a 30/6/2023 - Res. 5.029/2022.
+3.1.30.94-6;i;3.1.30.87-4;demais;investimento;2023-07-01;2024-06-30;;;;produtor;abc;;;Operações de investimento - Programa RenovAgro - contratadas de 1/7/2023 a 30/6/2024 - Res. 5.087/2023.
+3.1.30.97-7;c;demais;demais;custeio;2025-07-01;2026-06-30;;;;produtor;;;;Operações de Custeio - contratadas de 1/7/2025 a 30/6/2026.
+3.1.30.98-4;c;demais;demais;industrializacao;2025-07-01;2026-06-30;;;;produtor;;;;Operações de Industrialização - contratadas de 1/7/2025 a 30/6/2026.
+3.1.31.07-9;c;demais;demais;custeio;2026-07-01;2027-06-30;;;;produtor;;;;Operações de Custeio - contratadas de 1/7/2026 a 30/6/2027.
+3.1.31.08-6;c;demais;demais;industrializacao;2026-07-01;2027-06-30;;;;produtor;;;;Operações de Industrialização - contratadas de 1/7/2026 a 30/6/2027.
+3.1.21.31-9;i;demais;demais;custeio;;2026-06-30;;;;cooperativa;;;;Créditos de custeio para cooperativa de produção agropecuária - contratadas até 30/6/2026.
+3.1.21.75-9;i;demais;demais;industrializacao;;2026-06-30;;;;cooperativa;;;;Créditos de industrialização para cooperativa de produção agropecuária - contratadas até 30/6/2026.
+3.1.21.33-3;i;demais;demais;comercializacao;;2026-06-30;;;;cooperativa;;;;Créditos de comercialização para cooperativa de produção agropecuária, exceto FGPP - contratadas até 30/06/2026.
+3.1.21.34-0;i;demais;demais;custeio;;2026-06-30;;;;cooperativa_cooperados;;;;Créditos de custeio para atendimento a cooperados, destinado à aquisição de insumos para fornecimento aos cooperados - contratadas até 30/6/2026.
+3.1.21.35-7;i;demais;demais;investimento;;2017-06-30;;;;cooperativa_cooperados;;;;Créditos de investimento destinados à aquisição de bens para fornecimento a cooperados, para utilização na atividade de produção agropecuária, contratados até 30/6/2017.
+3.1.21.76-6;i;demais;demais;industrializacao;;2026-06-30;;;;cooperativa_cooperados;;;;Créditos de industrialização a cooperativas para atendimento a cooperados - contratadas até 30/6/2026.
+3.1.21.77-3;i;demais;demais;comercializacao;;2026-06-30;;;;cooperativa_cooperados;;;;Créditos de comercialização a cooperativas para atendimento a cooperados, exceto FGPP - contratadas até 30/6/2026.
+3.1.20.24-8;i;demais;demais;;;;;;;cooperativa;cotas_partes;;;Crédito a cooperativa de produção agropecuária como financiamento da integralização de cotas-partes do capital social.
+3.1.21.79-7;c;demais;demais;industrializacao;2026-07-01;2027-06-30;;;;cooperativa;;;;Créditos de industrialização para cooperativa de produção agropecuária na condição de produtor rural - contratadas de 1/7/2026 a 30/6/2027. (*)
+3.1.21.80-7;c;demais;demais;comercializacao;2026-07-01;2027-06-30;;;;cooperativa;;;;Créditos de comercialização para cooperativa de produção agropecuária, exceto FGPP - contratadas de 1/7/2026 a 30/6/2027.
+3.1.21.81-4;c;demais;demais;comercializacao;2026-07-01;2027-06-30;;;;cooperativa_servicos;;;;Créditos de comercialização a cooperativas de produção agropecuária na condição de sociedade prestadora de serviços de natureza agropecuária aos seus cooperados, exceto FGPP - contratadas de 1/7/2026 a 30/6/2027. (*)
+3.1.21.82-1;c;demais;demais;custeio;2026-07-01;2027-06-30;;;;cooperativa_cooperados;;;;Créditos de custeio para atendimento a cooperados, destinado à aquisição de insumos para fornecimento aos cooperados - contratadas de 1/7/2026 até 30/6/2027.
+3.1.21.83-8;c;demais;demais;custeio;2026-07-01;2027-06-30;;;;cooperativa;;;;Créditos de custeio para cooperativa de produção agropecuária - contratadas de 1/7/2026 a 30/6/2027.
+3.1.21.84-5;c;demais;demais;industrializacao;2026-07-01;2027-06-30;;;;cooperativa_servicos;;;;Créditos de industrialização para cooperativas de produção agropecuária na condição de sociedade prestadora de serviços de natureza agropecuária aos seus cooperados - contratadas de 1/7/2026 a 30/6/2027. (*)
+3.1.20.21-7;i;demais;demais;investimento;;2011-06-30;;;;cooperativa_cooperados;;1.1;4.1.40.01-4;Créditos a cooperativas para repasse a cooperados (MCR 5-5-19 e 6-2-7) - operações de investimento - contratadas até 30/6/2011.
+3.1.30.65-4;i;3.1.30.53-7;demais;;;;;;;produtor;renegociacao_2238;;;Renegociação de dívidas rurais - Resolução nº 2.238/1996.
+3.1.30.54-4;i;demais;demais;;;;;;;produtor;renegociacao_2238_tn;;;Renegociação de dívidas rurais - Valores cedidos ao Tesouro Nacional - Resolução nº 2.238/1996.
+3.1.30.57-5;i;demais;demais;;;;;;;produtor;renegociacao;;;Renegociação de dívidas de operações de crédito rural - Outras.
+3.1.30.58-2;i;demais;demais;;;;;;;produtor;proagro;;;Proagro - Ressarcimentos pendentes.
+3.1.30.59-9;i;demais;demais;;;;;;;produtor;excluida_subvencao;;;Financiamentos rurais excluídos da base da subvenção do Tesouro Nacional.
+3.1.30.61-6;i;demais;demais;;;;;;;produtor;outras_fontes;;;Operações contratadas originalmente com recursos de outras fontes.
+3.1.30.73-3;i;demais;demais;investimento;;;;;;produtor;res_4801;;;Operações de investimento prorrogadas - Res. nº 4.801/2020.
+3.1.30.75-7;i;demais;demais;custeio;;;;;;produtor;renegociacao_4802;;;Renegociação de operações de custeio - Res. nº 4.802/2020.
+3.1.30.76-4;i;demais;demais;investimento;;;;;;produtor;renegociacao_4802;;;Renegociação de operações de investimento - Res. nº 4.802/2020.
+3.1.30.96-0;i;demais;demais;custeio;;;;;;produtor;exig_adicional;;;Operações de custeio contratadas no âmbito das exigibilidades adicionais.
+3.1.30.99-1;i;demais;demais;;;;;;;produtor;desclassificada;;;Operações desclassificadas parcialmente.
+3.1.32.00-9;c;3.1.32.01-6;demais;;;;;;;produtor;res_5330;;;Operações de crédito rural - Resolução CMN nº 5.330/2026.
+3.1.40.10-1;i;pronamp;pronamp;custeio;;2010-06-30;;;;produtor;;;;Operações de custeio no Pronamp - Contratadas até 30/6/2010 (MCR 8-1 e MCR 6-2-5).
+3.1.40.11-8;i;3.1.41.39-9;pronamp;investimento;;2010-06-30;;;;produtor;;;;Operações de investimento no Pronamp - Contratadas até 30/6/2010 (MCR 8-1 e MCR 6-2-5).
+3.1.40.12-5;i;pronamp;pronamp;custeio;2010-07-01;2011-06-30;;;;produtor;;1.13;4.1.11.00-5;Operações de custeio no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2010 a 30/6/2011 (MCR 8-1 e MCR 6-2-5).
+3.1.40.13-2;i;3.1.41.39-9;pronamp;investimento;2010-07-01;2011-06-30;;;;produtor;;1.13;4.1.11.00-5;Operações de investimento no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2010 a 30/6/2011 (MCR 8-1 e MCR 6-2-5).
+3.1.40.16-3;i;pronamp;pronamp;custeio;2011-07-01;2012-06-30;;;;produtor;;1.1;4.1.11.01-2;Operações de custeio no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2011 a 30/6/2012 (MCR 8-1 e MCR 6-2-5).
+3.1.40.17-0;i;3.1.41.39-9;pronamp;investimento;2011-07-01;2012-06-30;;;;produtor;;1.1;4.1.11.01-2;Operações de investimento no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2011 a 30/6/2012 (MCR 8-1 e MCR 6-2-5).
+3.1.41.01-4;i;pronamp;pronamp;custeio;2012-07-01;2013-06-30;;;;produtor;;1.11;4.1.11.02-9;Operações de custeio no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2012 a 30/6/2013 (MCR 8-1 e MCR 6-2-5).
+3.1.41.02-1;i;3.1.41.39-9;pronamp;investimento;2012-07-01;2013-06-30;;;;produtor;;;;Operações de investimento no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2012 a 30/6/2013 (MCR 8-1 e MCR 6-2-5).
+3.1.41.06-9;i;3.1.41.39-9;pronamp;investimento;2013-07-01;2014-06-30;;;;produtor;;;;Operações de investimento no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2013 a 30/6/2014 (MCR 8-1 e MCR 6-2-5).
+3.1.41.08-3;i;3.1.41.39-9;pronamp;investimento;2013-07-01;2014-06-30;;;;produtor;semiarido;;;Operações de investimento no Pronamp para o Plano Safra Semiárido 2013/2014 - Resolução nº 4.254/2013 - Subexigibilidade Própria - Contratadas de 1/7/2013 a 30/6/2014 (MCR 8-2-2 e MCR 6-2- 5).
+3.1.41.17-9;i;pronamp;pronamp;custeio;2014-07-01;2015-06-30;;;;produtor;;1.11;4.1.11.06-7;Operações de custeio no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2014 a 30/6/2015 (MCR 8-1 e MCR 6-2-9).
+3.1.41.18-6;i;3.1.41.39-9;pronamp;investimento;2014-07-01;2015-06-30;;;;produtor;;;;Operações de investimento no Pronamp - Subexigibilidade Própria - Contratadas de 1/7/2014 a 30/6/2015 (MCR 8-1 e MCR 6-2-9).
+3.1.41.27-2;i;pronamp;pronamp;custeio;2015-07-01;2016-06-30;;;;produtor;;;;Operações de custeio no Pronamp - Contratadas de 1/7/2015 a 30/6/2016 (MCR 6-2-9 e 8-1).
+3.1.41.29-6;i;pronamp;pronamp;custeio;2016-07-01;2017-06-30;;;;produtor;;;;Operações de custeio no Pronamp - Contratadas de 1/7/2016 a 30/6/2017 (MCR 6-2-9 e 8-1).
+3.1.41.31-3;i;pronamp;pronamp;custeio;2017-07-01;2018-06-30;;;;produtor;;;;Operações de Custeio - Contratadas de 1/7/2017 a 30/6/2018.
+3.1.41.33-7;i;pronamp;pronamp;custeio;2018-07-01;2019-06-30;;;;produtor;;;;Operações de Custeio - Contratadas de 1/7/2018 a 30/6/2019.
+3.1.41.35-1;i;3.1.41.39-9;pronamp;investimento;2018-07-01;2019-06-30;;;;produtor;bovinos;;;Operações de investimento vinculadas ao Pronamp destinadas à aquisição de bovinos ou bubalinos para reprodução ou cria - contratadas de 1/7/2018 a 30/6/2019 - Res. 4.669/2018.
+3.1.41.37-5;i;pronamp;pronamp;custeio;2019-07-01;2020-06-30;;;;produtor;;;;Operações de Custeio - Contratadas de 1/7/2019 a 30/6/2020.
+3.1.41.38-2;i;3.1.41.39-9;pronamp;investimento;2019-07-01;2020-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronamp - contratadas de 1/7/2019 a 30/6/2020 - Res. 4.730/2019.
+3.1.41.40-9;i;pronamp;pronamp;custeio;2020-07-01;2021-06-30;;;;produtor;;;;Operações de Custeio - Contratadas de 1/7/2020 a 30/6/2021.
+3.1.41.41-6;i;3.1.41.39-9;pronamp;investimento;2020-07-01;2021-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronamp - contratadas de 1/7/2020 a 30/6/2021.
+3.1.41.42-3;i;pronamp;pronamp;custeio;2021-07-01;2022-06-30;;;;produtor;;;;Operações de Custeio - Contratadas de 1/7/2021 a 30/6/2022.
+3.1.41.43-0;i;3.1.41.39-9;pronamp;investimento;2021-07-01;2022-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronamp - contratadas de 1/7/2021 a 30/6/2022.
+3.1.41.44-7;i;pronamp;pronamp;custeio;2022-07-01;2023-06-30;;;;produtor;;;;Operações de custeio - Contratadas de 1/7/2022 a 30/6/2023.
+3.1.41.45-4;i;3.1.41.39-9;pronamp;investimento;2022-07-01;2023-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronamp - contratadas de 1/7/2022 a 30/6/2023.
+3.1.41.46-1;i;pronamp;pronamp;custeio;2023-07-01;2024-06-30;;;;produtor;;;;Operações de custeio - contratadas de 1/7/2023 a 30/6/2024.
+3.1.41.47-8;i;3.1.41.39-9;pronamp;investimento;2023-07-01;2024-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronamp - contratadas de 1/7/2023 a 30/6/2024.
+3.1.41.48-5;i;pronamp;pronamp;custeio;2024-07-01;2025-06-30;;;;produtor;;;;Operações de custeio - contratadas de 1/7/2024 a 30/6/2025.
+3.1.41.49-2;i;3.1.41.39-9;pronamp;investimento;2024-07-01;2025-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronamp - contratadas de 1/7/2024 a 30/6/2025.
+3.1.41.50-2;c;pronamp;pronamp;custeio;2025-07-01;2026-06-30;;;;produtor;;;;Operações de custeio vinculadas ao Pronamp - contratadas de 1/7/2025 a 30/6/2026.
+3.1.41.51-9;c;3.1.41.39-9;pronamp;investimento;2025-07-01;2026-06-30;;;;produtor;;;;Operações de investimento vinculadas ao Pronamp - contratadas de 1/7/2025 a 30/6/2026.
+3.1.41.52-6;c;pronamp;pronamp;custeio;2026-07-01;2027-06-30;;;;produtor;;;;Operações de custeio - contratadas de 1/7/2026 a 30/6/2027.
+3.1.41.53-3;c;3.1.41.39-9;pronamp;investimento;2026-07-01;2027-06-30;;;;produtor;;;;Operações de investimento - contratadas de 1/7/2026 a 30/6/2027.
+3.1.40.21-1;i;pronamp;pronamp;;;;;;;produtor;proagro;;;Proagro - Ressarcimentos pendentes.
+3.1.40.22-8;i;pronamp;pronamp;;;;;;;produtor;excluida_subvencao;;;Financiamentos rurais excluídos da base da subvenção do Tesouro Nacional.
+3.1.40.23-5;i;pronamp;pronamp;;;;;;;produtor;outras_fontes;;;Operações contratadas originalmente com recursos de outras fontes.
+3.1.40.24-2;i;pronamp;pronamp;;;;;;;produtor;renegociacao;;;Renegociação de dívidas de operações de crédito rural no âmbito do Pronamp - Outras.
+3.1.40.27-3;i;pronamp;pronamp;custeio;;;;;;produtor;res_4801;;;Operações de custeio vinculadas ao Pronamp - Res. nº 4.801/2020.
+3.1.40.28-0;i;pronamp;pronamp;custeio;;;;;;produtor;renegociacao_4802;;;Renegociação de operações de custeio vinculadas ao Pronamp - Res. nº 4.802/2020.
+3.1.40.29-7;i;3.1.41.39-9;pronamp;investimento;;;;;;produtor;renegociacao_4802;;;Renegociação de operações de investimento vinculadas ao Pronamp - Res. nº 4.802/2020.
+3.1.40.33-8;i;pronamp;pronamp;custeio;;;;;;produtor;res_4802;;;Operações de custeio vinculadas ao Pronamp - Res. nº 4.802/2020.
+3.1.40.35-2;i;3.1.40.34-5;pronamp;custeio;;;;;;produtor;peq_medio;;;Operações de custeio com pequenos e médios produtores rurais - MCR 6-2.
+3.1.40.36-9;i;pronamp;pronamp;;;;;;;produtor;desclassificada;;;Operações desclassificadas parcialmente, contratadas no âmbito do Pronamp.
+3.1.40.37-6;c;3.1.40.38-3;pronamp;;;;;;;produtor;res_5330;;;Operações de crédito rural, contratadas no âmbito do Pronamp - Resolução CMN nº 5.330/2026.
+3.2.10.09-3;i;credito_rural;;industrializacao;;;;;nao_controlados;;;;;Operações de Industrialização - recursos não controlados.
+3.2.10.10-3;i;credito_rural;;custeio;;;;;nao_controlados;;;;;Operações de custeio - recursos não controlados.
+3.2.10.11-0;i;credito_rural;;investimento;;;;;nao_controlados;;;;;Operações de investimento - recursos não controlados.
+3.2.10.12-7;i;credito_rural;;comercializacao;;;;;nao_controlados;;;;;Operações de comercialização - recursos não controlados.
+3.2.10.13-4;i;credito_rural;pronaf;;;2009-06-30;;;;;pronaf_condicoes_6_2;;;Operações formalizadas nas condições do MCR 6-2 no âmbito do Pronaf - contratadas até 30/6/2009 (MCR 6-4).
+3.2.10.20-6;i;credito_rural;pronaf;custeio;;2011-06-30;;;controlados;;;;;Operações de custeio formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas até 30/6/2011.
+3.2.10.21-3;i;credito_rural;pronaf;investimento;;2011-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4- 5) - contratadas até 30/6/2011.
+3.2.10.24-4;i;credito_rural;pronamp;investimento;;2011-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronamp - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas até 30/6/2011.
+3.2.10.29-9;i;credito_rural;;investimento;;;;;;;bndes;;;Operações de investimento nas condições dos programas do BNDES.
+3.2.10.30-9;i;credito_rural;;investimento;;;;;;;abc;;;Operações de investimento - Programa para Redução da Emissão de Gases de Efeito Estufa na Agricultura - Programa ABC (Resolução nº 3.896/2010) - Aplica-se exclusivamente ao Banco do Brasil S.A.
+3.2.10.34-7;i;credito_rural;pronaf;custeio;2011-07-01;2012-06-30;;;controlados;;;;;Operações de custeio formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2011 até 30/6/2012.
+3.2.10.35-4;i;credito_rural;pronaf;investimento;2011-07-01;2012-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4- 5) - contratadas de 1/7/2011 até 30/6/2012.
+3.2.10.38-5;i;credito_rural;pronamp;investimento;2011-07-01;2012-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronamp - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2011 até 30/6/2012.
+3.2.10.39-2;i;credito_rural;demais;custeio;2011-07-01;2012-06-30;;;controlados;;;;;Operações de custeio formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2011 até 30/6/2012.
+3.2.10.42-6;i;credito_rural;pronaf;custeio;2012-07-01;2013-06-30;;;controlados;;;;;Operações de custeio formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2012 até 30/6/2013.
+3.2.10.45-7;i;credito_rural;pronamp;custeio;2012-07-01;2013-06-30;;;controlados;;;;;Operações de custeio formalizadas ao amparo do Pronamp - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2012 até 30/6/2013.
+3.2.10.46-4;i;credito_rural;pronamp;investimento;2012-07-01;2013-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronamp - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2012 até 30/6/2013.
+3.2.10.47-1;i;credito_rural;demais;custeio;2012-07-01;2013-06-30;;;controlados;;;;;Operações de custeio formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2012 até 30/6/2013.
+3.2.10.49-5;i;credito_rural;demais;comercializacao;2012-07-01;2013-06-30;;;controlados;;;;;Operações de comercialização formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2012 até 30/6/2013.
+3.2.10.51-2;i;credito_rural;;;2013-07-01;2014-06-30;;;;;armazenagem;;;Financiamentos para Armazenagem (MCR 6-4-5-“a”) - contratadas de 1/7/2013 até 30/6/2014.
+3.2.11.01-6;i;3.2.10.54-3;pronaf;custeio;2013-07-01;2014-06-30;;;controlados;;res_4259;;;Operações de custeio formalizadas ao amparo do Pronaf - Resolução nº 4.259/2013 - recursos controlados (MCR 6-1-2, 6-4-5 e 6-4-8) - contratadas de 1/7/2013 até 30/6/2014.
+3.2.10.55-0;i;credito_rural;pronaf;investimento;2013-07-01;2014-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4- 5) - contratadas de 1/7/2013 até 30/6/2014.
+3.2.10.56-7;i;credito_rural;pronaf;investimento;2013-07-01;2014-06-30;;;controlados;;semiarido;;;Operações de investimento formalizadas ao amparo do Pronaf para o Plano Safra Semiárido 2013/2014 - recursos controlados - Resolução nº 4.248/2013 (MCR 6-1-2, 6-4-5 e 10-18-10) - contratadas de 1/7/2013 até 30/6/2014.
+3.2.10.62-2;i;credito_rural;pronamp;investimento;2013-07-01;2014-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronamp - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2013 até 30/6/2014.
+3.2.10.68-4;i;credito_rural;demais;investimento;2013-07-01;2014-06-30;;;controlados;;semiarido;;;Operações de investimento formalizadas com demais produtores para o Plano Safra Semiárido 2013/2014 - recursos controlados (MCR 6-1-2, 6-4-5 e 3-6-13) - Resolução nº 4.254/2013 - contratadas de 1/7/2013 até 30/6/2014.
+3.2.11.02-3;i;3.2.10.72-5;;investimento;2013-07-01;2013-12-31;;;controlados;;res_4259;;;Operações de investimento - Resolução nº 4.259/2013 - recursos controlados (MCR 6-1-2, 6-4-5 e 6-4-8) - contratadas de 1/7/2013 até 31/12/2013.
+3.2.10.73-2;i;credito_rural;;;2014-07-01;2015-06-30;;;;;armazenagem;;;Financiamentos para Armazenagem (MCR 6-4-5-“a”) - contratadas de 1/7/2014 até 30/6/2015.
+3.2.10.75-6;i;credito_rural;pronaf;investimento;2014-07-01;2015-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4- 5) - contratadas de 1/7/2014 até 30/6/2015.
+3.2.10.78-7;i;credito_rural;pronamp;investimento;2014-07-01;2015-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronamp - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2014 até 30/6/2015.
+3.2.10.79-4;i;credito_rural;demais;custeio;2014-07-01;2015-06-30;;;controlados;;;;;Operações de custeio formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2014 até 30/6/2015.
+3.2.10.80-4;i;credito_rural;demais;investimento;2014-07-01;2015-06-30;;;controlados;;;;;Operações de investimento formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2014 até 30/6/2015.
+3.2.10.83-5;i;credito_rural;;;2015-07-01;2016-06-30;;;;;armazenagem;;;Financiamentos para Armazenagem (MCR 6-4-5-“a”) - contratadas de 1/7/2015 até 30/6/2016.
+3.2.10.84-2;i;credito_rural;pronaf;custeio;2015-07-01;2016-06-30;;;controlados;;;;;Operações de custeio formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2015 até 30/6/2016.
+3.2.10.85-9;i;credito_rural;pronaf;investimento;2015-07-01;2016-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4- 5) - contratadas de 1/7/2015 até 30/6/2016.
+3.2.10.88-0;i;credito_rural;pronamp;investimento;2015-07-01;2016-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronamp - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2015 até 30/6/2016.
+3.2.10.89-7;i;credito_rural;demais;custeio;2015-07-01;2016-06-30;;;controlados;;;;;Operações de custeio formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2015 até 30/6/2016.
+3.2.10.90-7;i;credito_rural;demais;investimento;2015-07-01;2016-06-30;;;controlados;;;;;Operações de investimento formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2015 até 30/6/2016.
+3.2.11.03-0;i;credito_rural;;;2016-07-01;2017-06-30;;;;;armazenagem;;;Financiamento para Armazenagem – MCR 6-4-5-“a” – de 1/7/2016 a 30/6/2017.
+3.2.11.04-7;i;credito_rural;pronaf;custeio;2016-07-01;2017-06-30;;;controlados;;;;;Operações de custeio formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2016 até 30/6/2017.
+3.2.11.06-1;i;credito_rural;pronaf;investimento;2016-07-01;2017-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronaf - recursos controlados (MCR 6-1-2 e 6-4- 5) - contratadas de 1/7/2016 até 30/6/2017.
+3.2.11.10-2;i;credito_rural;pronamp;investimento;2016-07-01;2017-06-30;;;controlados;;;;;Operações de investimento formalizadas ao amparo do Pronamp - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2016 até 30/6/2017.
+3.2.11.11-9;i;credito_rural;demais;custeio;2016-07-01;2017-06-30;;;controlados;;;;;Operações de custeio formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6-4-5) - contratadas de 1/7/2016 até 30/6/2017.
+3.2.11.13-3;i;credito_rural;demais;investimento;2016-07-01;2017-06-30;;;controlados;;;;;Operações de investimento formalizadas com demais produtores - recursos controlados (MCR 6-1-2 e 6- 4-5) - contratadas de 1/7/2016 até 30/6/2017.
+3.2.11.15-7;i;credito_rural;;;2017-07-01;2018-06-30;;;;;armazenagem;;;Financiamentos para Armazenagem - MCR 6-4-5-"a" - contratadas de 1/7/2017 até 30/6/2018.
+3.2.11.16-4;i;credito_rural;pronaf;custeio;2017-07-01;2018-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - contratadas de 1/7/2017 até 30/6/2018.
+3.2.11.18-8;i;credito_rural;pronaf;investimento;2017-07-01;2018-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - contratadas de 1/7/2017 até 30/6/2018.
+3.2.11.20-5;i;credito_rural;pronamp;custeio;2017-07-01;2018-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - contratadas de 1/7/2017 até 30/6/2018.
+3.2.11.21-2;i;credito_rural;pronamp;investimento;2017-07-01;2018-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - contratadas de 1/7/2017 até 30/6/2018.
+3.2.11.22-9;i;credito_rural;demais;custeio;2017-07-01;2018-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - contratadas de 1/7/2017 até 30/6/2018.
+3.2.11.26-7;i;credito_rural;;;2018-07-01;2019-06-30;;;;;armazenagem;;;Financiamentos para Armazenagem - MCR 6-4-5-"a" - contratadas de 1/7/2018 até 30/6/2019.
+3.2.11.27-4;i;credito_rural;pronaf;custeio;2018-07-01;2019-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - contratadas de 1/7/2018 até 30/6/2019.
+3.2.11.29-8;i;credito_rural;pronaf;investimento;2018-07-01;2019-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - contratadas de 1/7/2018 até 30/6/2019.
+3.2.11.30-8;i;credito_rural;pronamp;custeio;2018-07-01;2019-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - contratadas de 1/7/2018 até 30/6/2019.
+3.2.11.31-5;i;credito_rural;pronamp;investimento;2018-07-01;2019-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - contratadas de 1/7/2018 até 30/6/2019.
+3.2.11.32-2;i;credito_rural;demais;custeio;2018-07-01;2019-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - contratadas de 1/7/2018 até 30/6/2019.
+3.2.11.34-6;i;credito_rural;demais;investimento;2018-07-01;2019-06-30;;;controlados;;;;;Operações de investimento - Demais produtores - Recursos controlados - contratadas de 1/7/2018 até 30/6/2019.
+3.2.11.37-7;i;credito_rural;pronaf;custeio;2019-07-01;2020-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - contratadas de 1/7/2019 até 30/6/2020.
+3.2.11.39-1;i;credito_rural;pronaf;investimento;2019-07-01;2020-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - contratadas de 1/7/2019 até 30/6/2020.
+3.2.11.40-1;i;credito_rural;pronamp;custeio;2019-07-01;2020-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - contratadas de 1/7/2019 até 30/6/2020.
+3.2.11.41-8;i;credito_rural;pronamp;investimento;2019-07-01;2020-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - contratadas de 1/7/2019 até 30/6/2020.
+3.2.11.42-5;i;credito_rural;demais;custeio;2019-07-01;2020-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - contratadas de 1/7/2019 até 30/6/2020.
+3.2.11.45-6;i;credito_rural;demais;comercializacao;2019-07-01;2020-06-30;;;controlados;;;;;Operações de comercialização - Demais produtores - Recursos controlados - contratadas de 1/7/2019 até 30/6/2020.
+3.2.11.46-3;i;credito_rural;pronaf;custeio;2019-02-01;2019-06-30;;;;;;2.39;4.2.10.81-0;Operações de custeio rural - Pronaf Adicional - contratadas de 1º/2/2019 até 30/6/2019.
+3.2.11.47-0;i;credito_rural;pronamp;custeio;2019-02-01;2019-06-30;;;;;;2.06;4.2.10.82-7;Operações de custeio rural - Pronamp Adicional - contratadas de 1º/2/2019 até 30/6/2019.
+3.2.11.48-7;i;credito_rural;;;2020-07-01;2021-06-30;;;;;armazenagem;;;Financiamentos para Armazenagem - MCR 6-4-5-"a" - de 1/7/2020 a 30/6/2021.
+3.2.11.49-4;i;credito_rural;pronaf;custeio;2020-07-01;2021-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - de 1/7/2020 a 30/6/2021.
+3.2.11.51-1;i;credito_rural;pronaf;investimento;2020-07-01;2021-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - de 1/7/2020 a 30/6/2021.
+3.2.11.52-8;i;credito_rural;pronamp;custeio;2020-07-01;2021-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - de 1/7/2020 a 30/6/2021.
+3.2.11.53-5;i;credito_rural;pronamp;investimento;2020-07-01;2021-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - de 1/7/2020 a 30/6/2021.
+3.2.11.54-2;i;credito_rural;demais;custeio;2020-07-01;2021-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - de 1/7/2020 a 30/6/2021.
+3.2.11.56-6;i;credito_rural;demais;investimento;2020-07-01;2021-06-30;;;controlados;;;;;Operações de investimento - Demais produtores - Recursos controlados - de 1/7/2020 a 30/6/2021.
+3.2.11.58-0;i;credito_rural;pronaf;custeio;2021-07-01;2022-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - de 1/7/2021 a 30/6/2022.
+3.2.11.60-7;i;credito_rural;pronaf;investimento;2021-07-01;2022-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - de 1/7/2021 a 30/6/2022.
+3.2.11.61-4;i;credito_rural;pronamp;custeio;2021-07-01;2022-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - de 1/7/2021 a 30/6/2022.
+3.2.11.62-1;i;credito_rural;pronamp;investimento;2021-07-01;2022-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - de 1/7/2021 a 30/6/2022.
+3.2.11.63-8;i;credito_rural;demais;custeio;2021-07-01;2022-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - de 1/7/2021 a 30/6/2022.
+3.2.11.65-2;i;credito_rural;demais;investimento;2021-07-01;2022-06-30;;;controlados;;;;;Operações de investimento - Demais produtores - Recursos controlados - de 1/7/2021 a 30/6/2022.
+3.2.11.66-9;i;credito_rural;demais;comercializacao;2021-07-01;2022-06-30;;;controlados;;;;;Operações de comercialização - Demais produtores - Recursos controlados - de 1/7/2021 a 30/6/2022.
+3.2.11.67-6;i;credito_rural;pronaf;custeio;2022-07-01;2023-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - de 1/7/2022 a 30/6/2023.
+3.2.11.69-0;i;credito_rural;pronaf;investimento;2022-07-01;2023-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - de 1/7/2022 a 30/6/2023.
+3.2.11.70-0;i;credito_rural;pronamp;custeio;2022-07-01;2023-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - de 1/7/2022 a 30/6/2023.
+3.2.11.71-7;i;credito_rural;pronamp;investimento;2022-07-01;2023-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - de 1/7/2022 a 30/6/2023.
+3.2.11.72-4;i;credito_rural;demais;custeio;2022-07-01;2023-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - de 1/7/2022 a 30/6/2023.
+3.2.11.74-8;i;credito_rural;demais;investimento;2022-07-01;2023-06-30;;;controlados;;;;;Operações de investimento - Demais produtores - Recursos controlados - de 1/7/2022 a 30/6/2023.
+3.2.11.75-5;i;credito_rural;demais;comercializacao;2022-07-01;2023-06-30;;;controlados;;;;;Operações de comercialização - Demais produtores - Recursos controlados - de 1/7/2022 a 30/6/2023.
+3.2.11.76-2;i;credito_rural;pronaf;custeio;2023-07-01;2024-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - de 1/7/2023 a 30/6/2024.
+3.2.11.78-6;i;credito_rural;pronaf;investimento;2023-07-01;2024-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - de 1/7/2023 a 30/6/2024.
+3.2.11.79-3;i;credito_rural;pronamp;custeio;2023-07-01;2024-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - de 1/7/2023 a 30/6/2024.
+3.2.11.80-3;i;credito_rural;pronamp;investimento;2023-07-01;2024-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - de 1/7/2023 a 30/6/2024.
+3.2.11.81-0;i;credito_rural;demais;custeio;2023-07-01;2024-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - de 1/7/2023 a 30/6/2024.
+3.2.11.83-4;i;credito_rural;demais;investimento;2023-07-01;2024-06-30;;;controlados;;;;;Operações de investimento - Demais produtores - Recursos controlados - de 1/7/2023 a 30/6/2024.
+3.2.11.84-1;i;credito_rural;demais;comercializacao;2023-07-01;2024-06-30;;;controlados;;;;;Operações de comercialização - Demais produtores - Recursos controlados - de 1/7/2023 a 30/6/2024.
+3.2.11.85-8;i;credito_rural;pronaf;custeio;2024-07-01;2025-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - de 1/7/2024 a 30/6/2025.
+3.2.11.87-2;i;credito_rural;pronaf;investimento;2024-07-01;2025-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - de 1/7/2024 a 30/6/2025.
+3.2.11.88-9;i;credito_rural;pronamp;custeio;2024-07-01;2025-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - de 1/7/2024 a 30/6/2025.
+3.2.11.89-6;i;credito_rural;pronamp;investimento;2024-07-01;2025-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - de 1/7/2024 a 30/6/2025.
+3.2.11.90-6;i;credito_rural;demais;custeio;2024-07-01;2025-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - de 1/7/2024 a 30/6/2025.
+3.2.11.92-0;i;credito_rural;demais;investimento;2024-07-01;2025-06-30;;;controlados;;;;;Operações de investimento - Demais produtores - Recursos controlados - de 1/7/2024 a 30/6/2025.
+3.2.11.93-7;i;credito_rural;demais;comercializacao;2024-07-01;2025-06-30;;;controlados;;;;;Operações de comercialização - Demais produtores - Recursos controlados - de 1/7/2024 a 30/6/2025.
+3.2.11.94-4;c;credito_rural;pronaf;custeio;2025-07-01;2026-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.11.95-1;c;credito_rural;pronaf;industrializacao;2025-07-01;2026-06-30;;;controlados;;;;;Operações de industrialização - Pronaf - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.11.96-8;c;credito_rural;pronaf;investimento;2025-07-01;2026-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.11.97-5;c;credito_rural;pronamp;custeio;2025-07-01;2026-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.11.98-2;c;credito_rural;pronamp;investimento;2025-07-01;2026-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.11.99-9;c;credito_rural;demais;custeio;2025-07-01;2026-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.12.00-8;c;credito_rural;demais;industrializacao;2025-07-01;2026-06-30;;;controlados;;;;;Operações de industrialização - Demais produtores - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.12.01-5;c;credito_rural;demais;investimento;2025-07-01;2026-06-30;;;controlados;;;;;Operações de investimento - Demais produtores - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.12.02-2;c;credito_rural;demais;comercializacao;2025-07-01;2026-06-30;;;controlados;;;;;Operações de comercialização - Demais produtores - Recursos Controlados - de 1/7/2025 a 30/6/2026.
+3.2.12.03-9;c;credito_rural;;industrializacao;2025-07-01;2026-06-30;;;nao_controlados;;;;;Operações de industrialização – Recursos não controlados - de 1/7/2025 a 30/6/2026.
+3.2.12.04-6;c;credito_rural;;custeio;2025-07-01;2026-06-30;;;nao_controlados;;;;;Operações de custeio – Recursos não controlados - de 1/7/2025 a 30/6/2026.
+3.2.12.05-3;c;credito_rural;;investimento;2025-07-01;2026-06-30;;;nao_controlados;;;;;Operações de investimento – Recursos não controlados - de 1/7/2025 a 30/6/2026.
+3.2.12.06-0;c;credito_rural;;comercializacao;2025-07-01;2026-06-30;;;nao_controlados;;;;;Operações de comercialização – Recursos não controlados - de 1/7/2025 a 30/6/2026.
+3.2.12.07-7;c;credito_rural;pronaf;custeio;2026-07-01;2027-06-30;;;controlados;;;;;Operações de custeio - Pronaf - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.08-4;c;credito_rural;pronaf;industrializacao;2026-07-01;2027-06-30;;;controlados;;;;;Operações de industrialização - Pronaf - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.09-1;c;credito_rural;pronaf;investimento;2026-07-01;2027-06-30;;;controlados;;;;;Operações de investimento - Pronaf - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.10-1;c;credito_rural;pronamp;custeio;2026-07-01;2027-06-30;;;controlados;;;;;Operações de custeio - Pronamp - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.11-8;c;credito_rural;pronamp;investimento;2026-07-01;2027-06-30;;;controlados;;;;;Operações de investimento - Pronamp - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.12-5;c;credito_rural;pronamp;comercializacao;2026-07-01;2027-06-30;;;controlados;;;;;Operações de comercialização - Pronamp - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.13-2;c;credito_rural;demais;custeio;2026-07-01;2027-06-30;;;controlados;;;;;Operações de custeio - Demais produtores - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.14-9;c;credito_rural;demais;industrializacao;2026-07-01;2027-06-30;;;controlados;;;;;Operações de industrialização - Demais produtores - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.15-6;c;credito_rural;demais;investimento;2026-07-01;2027-06-30;;;controlados;;;;;Operações de investimento - Demais produtores - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.16-3;c;credito_rural;demais;comercializacao;2026-07-01;2027-06-30;;;controlados;;;;;Operações de comercialização - Demais produtores - Recursos controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.17-0;c;credito_rural;;industrializacao;2026-07-01;2027-06-30;;;nao_controlados;;;;;Operações de Industrialização - Recursos não controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.18-7;c;credito_rural;;custeio;2026-07-01;2027-06-30;;;nao_controlados;;;;;Operações de custeio - Recursos não controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.19-4;c;credito_rural;;investimento;2026-07-01;2027-06-30;;;nao_controlados;;;;;Operações de investimento - Recursos não controlados - de 1/7/2026 a 30/6/2027.
+3.2.12.20-4;c;credito_rural;;comercializacao;2026-07-01;2027-06-30;;;nao_controlados;;;;;Operações de comercialização - Recursos não controlados - de 1/7/2026 a 30/6/2027.
+3.2.20.25-8;i;credito_rural;pronaf;;;;;;;;renegociacao_4028;2.0;4.2.10.60-7;Composição e renegociação de dívidas de operações de crédito rural no âmbito do Pronaf - Resolução nº 4.028/2011.
+3.2.20.26-5;i;credito_rural;;;;;;;;;renegociacao;;;Renegociação de dívidas de operações de crédito rural - Outras.
+3.2.20.27-2;i;credito_rural;;;;;;;;;desclassificada;;;Operações desclassificadas parcialmente.
+3.2.20.28-9;i;3.2.20.29-6;;;;;;;;;res_5247;;;Operações de crédito rural - Res. CMN nº 5.247/2025 e MCR 6-8-33.
+3.2.20.31-3;c;credito_rural;;;;;;;controlados;;res_5330;;;Operações de crédito rural - Resolução CMN nº 5.330/2026 - Recursos controlados.
+3.2.20.32-0;c;credito_rural;;;;;;;nao_controlados;;res_5330;;;Operações de crédito rural - Resolução CMN nº 5.330/2026 - Recursos não controlados.
+3.2.30.21-7;i;3.2.30.10-7;;;;;;;;;cpr;;;Aplicação mediante aquisição de Cédulas de Produto Rural (CPR).
+3.2.30.23-1;i;3.2.30.10-7;;;;;;;;;cpr_5330;;;Aquisição de Cédulas de Produto Rural (CPR) - Resolução CMN nº 5.330/2026.
+3.3.30.03-8;i;credito_rural;;custeio;;2017-06-30;;;;;;;;Operações de crédito rural de custeio - contratadas até 30/6/2017.
+3.3.30.06-9;i;credito_rural;;investimento;;2017-06-30;;;;;;;;Operações de crédito rural de investimento - contratadas até 30/6/2017.
+3.3.30.20-3;i;credito_rural;;custeio;2017-07-01;2018-06-30;;;;;;;;Operações de crédito rural de custeio - contratadas de 1/7/2017 a 30/6/2018.
+3.3.30.23-4;i;credito_rural;;investimento;2017-07-01;2018-06-30;;;;;;;;Operações de crédito rural de investimento - contratadas de 1/7/2017 a 30/6/2018.
+3.3.30.24-1;i;credito_rural;;custeio;2018-07-01;2019-06-30;;;;;;;;Operações de crédito rural de custeio - contratadas de 1/7/2018 a 30/6/2019.
+3.3.30.26-5;i;credito_rural;;comercializacao;2018-07-01;2019-06-30;;;;;;;;Operações de crédito rural de comercialização - contratadas de 1/7/2018 a 30/6/2019.
+3.3.30.27-2;i;credito_rural;;investimento;2018-07-01;2019-06-30;;;;;;;;Operações de crédito rural de investimento - contratadas de 1/7/2018 a 30/6/2019.
+3.3.30.28-9;i;credito_rural;;custeio;2019-07-01;2020-06-30;;;;;;;;Operações de crédito rural de custeio - contratadas de 1/7/2019 a 30/6/2020.
+3.3.30.31-3;i;credito_rural;;investimento;2019-07-01;2020-06-30;;;;;;;;Operações de crédito rural de investimento - contratadas de 1/7/2019 a 30/6/2020.
+3.3.30.32-0;i;credito_rural;;custeio;2020-07-01;2021-06-30;;;;;;;;Operações de crédito rural de custeio - contratadas de 1/7/2020 a 30/6/2021.
+3.3.30.34-4;i;credito_rural;;comercializacao;2020-07-01;2021-06-30;;;;;;;;Operações de crédito rural de comercialização - contratadas de 1/7/2020 a 30/6/2021.
+3.3.30.35-1;i;credito_rural;;investimento;2020-07-01;2021-06-30;;;;;;;;Operações de crédito rural de investimento - contratadas de 1/7/2020 a 30/6/2021.
+3.3.30.36-8;i;credito_rural;;custeio;2021-07-01;2022-06-30;;;;;;;;Operações de crédito rural de custeio - contratadas de 1/7/2021 a 30/6/2022.
+3.3.30.37-5;i;credito_rural;;industrializacao;2021-07-01;2022-06-30;;;;;;;;Operações de crédito rural de industrialização - contratadas de 1/7/2021 a 30/6/2022.
+3.3.30.38-2;i;credito_rural;;comercializacao;2021-07-01;2022-06-30;;;;;;;;Operações de crédito rural de comercialização - contratadas de 1/7/2021 a 30/6/2022.
+3.3.30.39-9;i;credito_rural;;investimento;2021-07-01;2022-06-30;;;;;;;;Operações de crédito rural de investimento - contratadas de 1/7/2021 a 30/6/2022.
+3.3.30.40-9;i;credito_rural;;custeio;2022-07-01;2023-06-30;;;;;;;;Operações de crédito rural de custeio - contratadas de 1/7/2022 a 30/6/2023.
+3.3.30.41-6;i;credito_rural;;industrializacao;2022-07-01;2023-06-30;;;;;;;;Operações de crédito rural de industrialização - contratadas de 1/7/2022 a 30/6/2023.
+3.3.30.42-3;i;credito_rural;;comercializacao;2022-07-01;2023-06-30;;;;;;;;Operações de crédito rural de comercialização - contratadas de 1/7/2022 a 30/6/2023.
+3.3.30.43-0;i;credito_rural;;investimento;2022-07-01;2023-06-30;;;;;;;;Operações de crédito rural de investimento - contratadas de 1/7/2022 a 30/6/2023.
+3.3.30.44-7;i;credito_rural;;custeio;2023-07-01;2024-06-30;;;controlados;;;;;Operações de crédito rural de custeio - Recursos Controlados - contratadas de 1/7/2023 a 30/6/2024.
+3.3.30.46-1;i;credito_rural;;comercializacao;2023-07-01;2024-06-30;;;controlados;;;;;Operações de crédito rural de comercialização - Recursos Controlados - contratadas de 1/7/2023 a 30/6/2024.
+3.3.30.47-8;i;credito_rural;;investimento;2023-07-01;2024-06-30;;;controlados;;;;;Operações de crédito rural de investimento - Recursos Controlados - contratadas de 1/7/2023 a 30/6/2024.
+3.3.30.48-5;i;credito_rural;;custeio;2023-07-01;2024-06-30;;;nao_controlados;;;;;Operações de crédito rural de custeio contratadas de 1/7/2023 a 30/6/2024 nas condições dos recursos livres.
+3.3.30.49-2;i;credito_rural;;industrializacao;2023-07-01;2024-06-30;;;nao_controlados;;;;;Operações de crédito rural de industrialização contratadas de 1/7/2023 a 30/6/2024 nas condições dos recursos livres.
+3.3.30.50-2;i;credito_rural;;comercializacao;2023-07-01;2024-06-30;;;nao_controlados;;;;;Operações de crédito rural de comercialização contratadas de 1/7/2023 a 30/6/2024 nas condições dos recursos livres.
+3.3.30.51-9;i;credito_rural;;investimento;2023-07-01;2024-06-30;;;nao_controlados;;;;;Operações de crédito rural de investimento contratadas de 1/7/2023 a 30/6/2024 nas condições dos recursos livres.
+3.3.30.52-6;i;credito_rural;;custeio;2024-07-01;2025-06-30;;;controlados;;;;;Operações de crédito rural de custeio - Recursos Controlados - contratadas de 1/7/2024 a 30/6/2025.
+3.3.30.53-3;i;credito_rural;;industrializacao;2024-07-01;2025-06-30;;;controlados;;;;;Operações de crédito rural de industrialização - Recursos Controlados - contratadas de 1/7/2024 a 30/6/2025.
+3.3.30.54-0;i;credito_rural;;comercializacao;2024-07-01;2025-06-30;;;controlados;;;;;Operações de crédito rural de comercialização - Recursos Controlados - contratadas de 1/7/2024 a 30/6/2025.
+3.3.30.55-7;i;credito_rural;;investimento;2024-07-01;2025-06-30;;;controlados;;;;;Operações de crédito rural de investimento - Recursos Controlados - contratadas de 1/7/2024 a 30/6/2025.
+3.3.30.56-4;i;credito_rural;;custeio;2024-07-01;2025-06-30;;;nao_controlados;;;;;Operações de crédito rural de custeio contratadas de 1/7/2024 a 30/6/2025 nas condições dos recursos livres.
+3.3.30.57-1;i;credito_rural;;industrializacao;2024-07-01;2025-06-30;;;nao_controlados;;;;;Operações de crédito rural de industrialização contratadas de 1/7/2024 a 30/6/2025 nas condições dos recursos livres.
+3.3.30.58-8;i;credito_rural;;comercializacao;2024-07-01;2025-06-30;;;nao_controlados;;;;;Operações de crédito rural de comercialização contratadas de 1/7/2024 a 30/6/2025 nas condições dos recursos livres.
+3.3.30.59-5;i;credito_rural;;investimento;2024-07-01;2025-06-30;;;nao_controlados;;;;;Operações de crédito rural de investimento contratadas de 1/7/2024 a 30/6/2025 nas condições dos recursos livres.
+3.3.30.60-5;c;credito_rural;;custeio;2025-07-01;2026-06-30;;;controlados;;;;;Operações de crédito rural de custeio – Recursos Controlados - contratadas de 1/7/2025 a 30/6/2026.
+3.3.30.61-2;c;credito_rural;;industrializacao;2025-07-01;2026-06-30;;;controlados;;;;;Operações de crédito rural de industrialização – Recursos Controlados - contratadas de 1/7/2025 a 30/6/2026.
+3.3.30.62-9;c;credito_rural;;comercializacao;2025-07-01;2026-06-30;;;controlados;;;;;Operações de crédito rural de comercialização – Recursos Controlados - contratadas de 1/7/2025 a 30/6/2026.
+3.3.30.63-6;c;credito_rural;;investimento;2025-07-01;2026-06-30;;;controlados;;;;;Operações de crédito rural de investimento – Recursos Controlados - contratadas de 1/7/2025 a 30/6/2026.
+3.3.30.64-3;c;credito_rural;;custeio;2025-07-01;2026-06-30;;;nao_controlados;;;;;Operações de crédito rural de custeio contratadas de 1/7/2025 a 30/6/2026 nas condições dos recursos livres.
+3.3.30.65-0;c;credito_rural;;industrializacao;2025-07-01;2026-06-30;;;nao_controlados;;;;;Operações de crédito rural de industrialização contratadas de 1/7/2025 a 30/6/2026 nas condições dos recursos livres.
+3.3.30.66-7;c;credito_rural;;comercializacao;2025-07-01;2026-06-30;;;nao_controlados;;;;;Operações de crédito rural de comercialização contratadas de 1/7/2025 a 30/6/2026 nas condições dos recursos livres.
+3.3.30.67-4;c;credito_rural;;investimento;2025-07-01;2026-06-30;;;nao_controlados;;;;;Operações de crédito rural de investimento contratadas de 1/7/2025 a 30/6/2026 nas condições dos recursos livres.
+3.3.30.68-1;c;credito_rural;;custeio;2026-07-01;2027-06-30;;;controlados;;;;;Operações de crédito rural de custeio - Recursos Controlados - contratadas de 1/7/2026 a 30/6/2027.
+3.3.30.69-8;c;credito_rural;;industrializacao;2026-07-01;2027-06-30;;;controlados;;;;;Operações de crédito rural de industrialização - Recursos Controlados - contratadas de 1/7/2026 a 30/6/2027.
+3.3.30.70-8;c;credito_rural;;comercializacao;2026-07-01;2027-06-30;;;controlados;;;;;Operações de crédito rural de comercialização - Recursos Controlados - contratadas de 1/7/2026 a 30/6/2027.
+3.3.30.71-5;c;credito_rural;;investimento;2026-07-01;2027-06-30;;;controlados;;;;;Operações de crédito rural de investimento - Recursos Controlados - contratadas de 1/7/2026 a 30/6/2027.
+3.3.30.72-2;c;credito_rural;;custeio;2026-07-01;2027-06-30;;;nao_controlados;;;;;Operações de crédito rural de custeio contratadas de 1/7/2026 a 30/6/2027 - Recursos não controlados.
+3.3.30.73-9;c;credito_rural;;industrializacao;2026-07-01;2027-06-30;;;nao_controlados;;;;;Operações de crédito rural de industrialização contratadas de 1/7/2026 a 30/6/2027 - Recursos não controlados.
+3.3.30.74-6;c;credito_rural;;comercializacao;2026-07-01;2027-06-30;;;nao_controlados;;;;;Operações de crédito rural de comercialização contratadas de 1/7/2026 a 30/6/2027 - Recursos não controlados.
+3.3.30.75-3;c;credito_rural;;investimento;2026-07-01;2027-06-30;;;nao_controlados;;;;;Operações de crédito rural de investimento contratadas de 1/7/2026 a 30/6/2027 - Recursos não controlados.
+3.3.20.10-3;i;credito_rural;;;;;;;;;renegociacao;;;Renegociação de dívidas de operações de crédito rural.
+3.3.20.16-5;i;3.3.20.17-2;;;;;;;;;res_5247_i;;;Operações de crédito rural - art. 2º, inciso I, da Res. CMN nº 5.247/2025 e MCR 6-8-34.
+3.3.20.11-0;i;credito_rural;;;;;;;;;desclassificada;;;Operações desclassificadas parcialmente.
+3.3.20.18-9;c;credito_rural;;;;;;;controlados;;res_5330;;;Operações de crédito rural - Resolução CMN nº 5.330/2026 - Recursos controlados.
+3.3.20.19-6;c;credito_rural;;;;;;;nao_controlados;;res_5330;;;Operações de crédito rural - Resolução CMN nº 5.330/2026 - Recursos não controlados.
+3.3.10.16-8;i;faculdade;;;;2018-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7-5-"b" e do MCR 6-7-5-A - adquiridas até 30/6/2018.
+3.3.10.21-6;i;faculdade;;;2018-07-01;2019-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7-5-"b" e do MCR 6-7-5-A - adquiridas de 1/7/2018 a 30/6/2019.
+3.3.10.22-3;i;faculdade;;;2019-07-01;2020-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7-5-"b"-I e do MCR 6-7-5-A - adquiridas de 1/7/2019 a 30/6/2020.
+3.3.30.12-4;i;faculdade;;;2020-07-01;2021-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7-5-“b”-I e IV e do MCR 6-7-5-A - adquiridas de 1/7/2020 a 30/6/2021.
+3.3.30.15-5;i;faculdade;;;2021-07-01;2022-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7 - adquiridas de 1/7/2021 a 30/6/2022.
+3.3.30.16-2;i;faculdade;;;2022-07-01;2023-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7 - adquiridas de 1/7/2022 a 30/6/2023.
+3.3.30.10-0;i;faculdade;;;;;;;;;cra;;;Aquisição de CRA nas condições do MCR 6-7.
+3.3.30.13-1;i;faculdade;;;;;;;;;cda_wa;;;Aquisição de CDA e WA nas condições do MCR 6-7.
+3.3.30.14-8;i;faculdade;;;;;;;;;fundo_garantidor;;;Aquisição de quotas de fundos garantidores de crédito com produtores rurais nas condições do MCR 6-7.
+3.3.30.07-6;i;faculdade;;;;2021-04-30;;;;;mcr_6_8_6;;;Operações referidas no MCR 6-8-6, contratadas até 30/4/2021.
+3.3.30.08-3;i;faculdade;;;;;;;;;cdca;;;Aquisição de CDCA nas condições do MCR 6-7.
+3.3.30.17-9;i;faculdade;;;2023-07-01;2024-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7 - adquiridas de 1/7/2023 a 30/6/2024.
+3.3.30.18-6;i;faculdade;;;2024-07-01;2025-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7 - adquiridas de 1/7/2024 a 30/6/2025.
+3.3.30.19-3;i;faculdade;;;2025-07-01;2026-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7 - adquiridas de 1/7/2025 a 30/6/2026.
+3.3.30.76-0;i;faculdade;;;2026-07-01;2027-06-30;;;;;cpr;;;Aquisição de CPR nas condições do MCR 6-7 - adquiridas de 1/7/2026 a 30/6/2027.
+3.3.40.08-0;i;3.3.40.09-7;;;;;;;;;res_5247_ii_iii;;;Operações de crédito - art. 2º, incisos II e III, da Res. CMN nº 5.247/2025 e MCR 6-8-34.
+3.3.40.11-4;i;faculdade;;;;;;;;;cpr_5330;;;Aquisição de Cédulas de Produto Rural (CPR) - Res. CMN nº 5.330/2026."""
+_COLS = ("codigo", "tipo", "cat", "programa", "finalidade", "de", "ate", "taxa_max", "taxa_min", "recursos",
+         "beneficiario", "linha", "fator", "ponderador", "titulo")
+REGRAS = [dict(zip(_COLS, l.split(";")), fonte=FONTE_DO_CODIGO[l[:3]]) for l in REGRAS_TXT.splitlines()]
+CODIGOS = {r["codigo"]: r for r in REGRAS}
+ACEITOS = {k: sorted({r[k] for r in REGRAS} - {""}) for k in ("programa", "finalidade", "recursos", "beneficiario", "linha")}
+
 # grupos que a gerência preenche (liberação, % de reembolso, prazo) -> onde a liberação nova entra
 GRUPOS = {"RO_PRONAF": ("RO", "pronaf"), "RO_PRONAMP": ("RO", "pronamp"), "RO_DEMAIS": ("RO", "demais"),
           "POUP": ("POUP", "credito_rural"), "LCA": ("LCA", "credito_rural")}
@@ -69,8 +437,10 @@ LINHAS = {
              ("capt_dir", "2.2.20.00-8", "Captação DIR-Poup"),
              ("exig_total", "2.2.00.00-4", "Exigibilidade - Total"),
              ("sub", "2.2.10.10-4", "Subexigibilidade - crédito rural"),
+             ("exig_liquida", "2.2.50.00-9", "Exigibilidade - Líquida"),
+             ("cpr_limite", "2.2.40.00-2", "Faculdade CPR (5% da própria)"),
              ("ap_cr", "3.2.10.00-0", "Aplicado - crédito rural"),
-             ("ap_cpr", "2.2.40.00-2", "Aplicado - CPR (até 5%)"),
+             ("ap_cpr", "3.2.30.00-4", "Aplicado - faculdade CPR"),
              ("ap_total", "3.2.00.00-3", "Aplicado - Total"),
              ("def_sub", "5.2.11.00-7", "Deficiência crédito rural"), ("exc_sub", "5.2.12.00-6", "Excesso crédito rural"),
              ("def_total", "5.2.01.00-0", "Deficiência Poupança Rural"),
@@ -89,6 +459,14 @@ LINHAS = {
             ("def_sub", "5.3.11.00-0", "Deficiência crédito rural"), ("exc_sub", "5.3.12.00-9", "Excesso crédito rural"),
             ("def_total", "5.3.01.00-3", "Deficiência LCA"), ("exc_total", "5.3.02.00-2", "Excesso LCA")],
 }
+for _cod, (_an, _b, _base, _pct, _exc, _desc) in LIMITES.items():  # linhas dos códigos de limite
+    _l = LINHAS[_an]
+    _l.insert(next(j for j, x in enumerate(_l) if x[0].startswith("ap_")), ("lim_" + _cod, _cod, _desc))
+    if _exc:
+        _l.insert(next(j for j, x in enumerate(_l) if x[0].startswith("ap_")), ("exc_" + _cod, "3.1.30.78-8",
+                                                                                 "Excedente do 3.1.40.34-5 (vai para a Geral)"))
+LINHAS_INFORMADAS = {"1.3.10.00-5", "3.3.20.15-8"}  # as demais linhas de LINHAS o Sisex calcula
+
 # visão dos diretores: rótulo, anexo, chave do excesso, chave da deficiência
 RESUMO = [("Recursos Obrigatórios", "RO", "exc_total", "def_total"),
           ("RO - Exigibilidade Geral", "RO", "exc_geral", "def_geral"),
@@ -198,16 +576,73 @@ def gravar(caminho, cabecalho, linhas):
     return caminho
 
 
-def validar_classe(fonte, cat, onde):
-    if cat not in CATEGORIAS.get(fonte, ()):
-        sys.exit(f"{onde}: fonte/categoria inválida {fonte}/{cat}. Aceitas: "
-                 + "; ".join(f"{f}: {', '.join(sorted(c))}" for f, c in CATEGORIAS.items()))
+def balde(codigo):
+    cat = CODIGOS[codigo]["cat"]
+    return LIMITES[cat][1] if cat in LIMITES else BALDE[CODIGOS[codigo]["fonte"]][cat]
 
 
-def grupo(fonte, cat):
+def grupo(codigo):
+    """Grupo da gerência a que o código pertence (para o % de reembolso)."""
+    if not codigo:
+        return None
+    fonte = CODIGOS[codigo]["fonte"]
+    if fonte != "RO":
+        return fonte
+    return {"ap_pronaf": "RO_PRONAF", "ap_pronamp": "RO_PRONAMP"}.get(balde(codigo), "RO_DEMAIS")
+
+
+def classificar(op):
+    """Código do Documento 6 da operação pelas regras de REGRAS_TXT. Devolve (código, empatados).
+
+    Entra a regra cujas condições a operação cumpre (fonte, programa, finalidade, recursos, beneficiário, linha
+    especial, período de contratação e taxa); havendo mais de uma, vale a mais específica: período mais curto,
+    depois menor teto de taxa, depois mais condições. Sem regra -> "" (não cumpre exigibilidade)."""
+    cands = []
+    for r in REGRAS:
+        if r["fonte"] != op["fonte"] or r["linha"] != op.get("linha", ""):
+            continue
+        if any(r[k] and r[k] != op.get(k, "") for k in ("programa", "finalidade", "recursos", "beneficiario")):
+            continue
+        d, tx = op["data_contratacao"], op["taxa_aa"]
+        if (r["de"] and d < r["de"]) or (r["ate"] and d > r["ate"]):
+            continue
+        if (r["taxa_max"] and tx > float(r["taxa_max"])) or (r["taxa_min"] and tx <= float(r["taxa_min"])):
+            continue
+        dias = (date.fromisoformat(r["ate"] or "2099-12-31") - date.fromisoformat(r["de"] or "1900-01-01")).days
+        teto = float(r["taxa_max"]) if r["taxa_max"] else 999.0
+        n = sum(bool(r[k]) for k in ("programa", "finalidade", "recursos", "taxa_min"))
+        cands.append(((dias, teto, -n), r["codigo"]))
+    if not cands:
+        return "", []
+    cands.sort()
+    return cands[0][1], [c for k, c in cands if k == cands[0][0]]
+
+
+def ler_classificacao(r, onde, data_padrao=None):
+    """Lê as colunas de classificação de uma linha de operacoes/liberacoes. Devolve (código, motivo)."""
+    fonte = (r.get("fonte") or "").strip().upper()
+    if fonte not in FONTES:
+        sys.exit(f"{onde}: fonte '{fonte}' inválida. Aceitas: {', '.join(FONTES)}")
+    if fonte == "LIVRE":
+        return "", "livre"
+    op = {"fonte": fonte, "taxa_aa": num(r.get("taxa_aa"))}
+    for k in ("programa", "finalidade", "recursos", "beneficiario", "linha"):
+        op[k] = (r.get(k) or "").strip().lower()
+        if op[k] and op[k] not in ACEITOS[k]:
+            sys.exit(f"{onde}: {k} '{op[k]}' inválido. Aceitos: {', '.join(ACEITOS[k])}")
     if fonte == "RO":
-        return "RO_PRONAF" if cat.startswith("pronaf") else "RO_PRONAMP" if cat.startswith("pronamp") else "RO_DEMAIS"
-    return fonte if fonte in GRUPOS else None
+        op["beneficiario"] = op["beneficiario"] or "produtor"
+    dc = (r.get("data_contratacao") or "").strip()
+    op["data_contratacao"] = (dt(dc) if dc else data_padrao or date(1900, 1, 1)).isoformat()
+    regra, emp = classificar(op)
+    informado = (r.get("codigo") or "").strip()
+    if informado:
+        if informado not in CODIGOS or CODIGOS[informado]["fonte"] != fonte:
+            sys.exit(f"{onde}: código {informado} não é código de aplicação do anexo da fonte {fonte}")
+        return informado, "informado" if informado == regra else f"informado (regra daria {regra or 'sem código'})"
+    if not regra:
+        return "", "sem código no Documento 6"
+    return regra, "regra" if len(emp) == 1 else f"regra empatada com {', '.join(emp[1:])}"
 
 
 # ---------------------------------------------------------------- projeção operação a operação
@@ -215,9 +650,9 @@ def grupo(fonte, cat):
 def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset()):
     """Saldo diário de cada operação até a liquidação.
 
-    Devolve (res, pagos): res = {(id, mes): [fonte, categoria, saldo_medio, fator]}, pagos = {(grupo, mes): valor}.
+    Devolve (res, pagos): res = {(id, mes): [codigo, saldo_medio]}, pagos = {(grupo, mes): valor}.
     Saldo médio = soma dos saldos dos dias úteis / dias úteis do mês, com zero antes da 1ª liberação e depois da
-    liquidação (Doc 6, Anexo I, 4.6-b). A fonte/categoria do mês é a do dia 15 (Doc 6, Anexo I, 12.2-b).
+    liquidação (Doc 6, Anexo I, 4.6-b). O código do mês é o do dia 15 (Doc 6, Anexo I, 12.2-b).
     """
     ops = {k: dict(v) for k, v in ops.items()}
     pag = defaultdict(dict)
@@ -236,7 +671,7 @@ def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset())
         if c["tipo"] == "liquidacao":
             liq[c["id"]] = c["data"]
         elif c["tipo"] == "reclassificacao":
-            recl[c["id"]][c["data"]] = (c["fonte"], c["categoria"])
+            recl[c["id"]][c["data"]] = c["codigo"]
         else:
             sys.exit(f"cenário: tipo desconhecido '{c['tipo']}' (use liquidacao ou reclassificacao)")
     du = {}
@@ -250,11 +685,11 @@ def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset())
     res, pagos = {}, defaultdict(float)
     # shortcut: loop diário em Python (60 mil ops x 600 dias ~ alguns minutos); vetorizar se ficar lento
     for i, op in ops.items():
-        saldo, fonte, cat = op["saldo"], op["fonte"], op["categoria"]
+        saldo, cod = op["saldo"], op["codigo"]
         fat_dia = (1 + op["taxa_aa"] / 100) ** (1 / 365)  # shortcut: juros compostos por dia corrido; ajustar à regra real
         soma, cls = defaultdict(float), {}
         m0 = data_base.strftime("%Y-%m")
-        cls[m0] = (fonte, cat)
+        cls[m0] = cod
         # shortcut: dias úteis do mês da data-base antes dela entram com o saldo da data-base
         soma[m0] += saldo * sum(1 for k in range(1, data_base.day) if util(data_base.replace(day=k)))
         ult_lib = max(lib[i], default=None)
@@ -264,16 +699,16 @@ def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset())
             if d > data_base:
                 saldo *= fat_dia
             if d in recl[i]:
-                fonte, cat = recl[i][d]
+                cod = recl[i][d]
             saldo += lib[i].get(d, 0.0)
             if d in pag[i]:
                 pago = saldo if d == ultima[i] else min(pag[i][d], saldo)  # a última parcela liquida
                 saldo -= pago
-                pagos[(grupo(fonte, cat), m)] += pago
+                pagos[(grupo(cod), m)] += pago
             if liq.get(i) == d:
                 saldo = 0.0
             if m not in cls or d.day <= 15:
-                cls[m] = (fonte, cat)
+                cls[m] = cod
             if util(d):
                 soma[m] += saldo
             if saldo <= 0.0 and (ult_lib is None or d >= ult_lib):
@@ -281,44 +716,46 @@ def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset())
             d += timedelta(days=1)
         for m, s in soma.items():
             if s > 0:
-                res[(i, m)] = [*cls[m], s / n_uteis(m), op["fator"]]
+                res[(i, m)] = [cls[m], s / n_uteis(m)]
     return res, {k: v for k, v in pagos.items() if k[0]}
 
 
 def carregar_entradas(pasta, data_base, feriados):
     """Lê a pasta de entradas. Detalhe dos arquivos no README."""
     p = Path(pasta)
-    ops = {}
+    ops, classif = {}, []
     for n, r in enumerate(ler(achar(p, "operacoes", True)), start=2):
-        fonte, cat = r["fonte"].strip().upper(), r["categoria"].strip().lower()
-        validar_classe(fonte, cat, f"operacoes linha {n}")
-        ops[r["id"].strip()] = {"fonte": fonte, "categoria": cat, "saldo": num(r["saldo"]),
-                                "taxa_aa": num(r.get("taxa_aa")), "fator": num(r.get("fator")) or 1.0}
+        i = r["id"].strip()
+        cod, motivo = ler_classificacao(r, f"operacoes linha {n}")
+        ops[i] = {"codigo": cod, "saldo": num(r["saldo"]), "taxa_aa": num(r.get("taxa_aa"))}
+        classif.append([i, r["fonte"].strip().upper(), cod, CODIGOS[cod]["tipo"] if cod else "", motivo])
     parcelas = [(r["id"].strip(), dt(r["data"]), num(r["valor"])) for r in ler(achar(p, "parcelas", True))]
     libs = []
     for n, r in enumerate(ler(achar(p, "liberacoes")) if achar(p, "liberacoes") else [], start=2):
-        i = r["id"].strip()
-        extra = {"fonte": (r.get("fonte") or "").strip().upper(), "categoria": (r.get("categoria") or "").strip().lower(),
-                 "taxa_aa": num(r.get("taxa_aa")), "fator": num(r.get("fator")) or 1.0}
-        if i not in ops:
-            validar_classe(extra["fonte"], extra["categoria"], f"liberacoes linha {n} (operação nova precisa de fonte/categoria)")
-        libs.append((i, dt(r["data"]), num(r["valor"]), extra))
+        i, d = r["id"].strip(), dt(r["data"])
+        extra = {}
+        if i not in ops and i not in {x[0] for x in libs}:  # operação nova: classifica como em operacoes
+            cod, motivo = ler_classificacao(r, f"liberacoes linha {n} (operação nova precisa de fonte e classificação)", d)
+            extra = {"codigo": cod, "taxa_aa": num(r.get("taxa_aa"))}
+            classif.append([i, r["fonte"].strip().upper(), cod, CODIGOS[cod]["tipo"] if cod else "", motivo])
+        libs.append((i, d, num(r["valor"]), extra))
     cenario = []
     for n, r in enumerate(ler(achar(p, "cenario")) if achar(p, "cenario") else [], start=2):
         c = {"tipo": r["tipo"].strip().lower(), "id": r["id"].strip(), "data": dt(r["data"]),
-             "fonte": (r.get("fonte") or "").strip().upper(), "categoria": (r.get("categoria") or "").strip().lower()}
-        if c["tipo"] == "reclassificacao":
-            validar_classe(c["fonte"], c["categoria"], f"cenario linha {n}")
+             "codigo": (r.get("codigo") or "").strip()}
+        if c["tipo"] == "reclassificacao" and c["codigo"] and c["codigo"] not in CODIGOS:
+            sys.exit(f"cenario linha {n}: código {c['codigo']} não é código de aplicação (vazio = sai da exigibilidade)")
         cenario.append(c)
     mes_base = data_base.strftime("%Y-%m")
     realizado, avisos = defaultdict(lambda: defaultdict(float)), []
     for n, r in enumerate(ler(achar(p, "realizado")) if achar(p, "realizado") else [], start=2):
-        fonte, cat, m = r["fonte"].strip().upper(), r["categoria"].strip().lower(), mes_da_linha(r)
-        validar_classe(fonte, cat, f"realizado linha {n}")
+        cod, m = r["codigo"].strip(), mes_da_linha(r)
+        if cod not in CODIGOS:
+            sys.exit(f"realizado linha {n}: código {cod} não é código de aplicação dos anexos II, III ou IV")
         if m >= mes_base:
             avisos.append(f"realizado linha {n}: mês {m} não é anterior à data-base; ignorado (vale a projeção)")
-        elif fonte != "LIVRE":
-            realizado[f"{fonte}|{cat}"][m] += num(r["saldo_medio"]) * (num(r.get("fator")) or 1.0)
+        else:
+            realizado[cod][m] += num(r["saldo_medio"])
     vsr = defaultdict(list)
     for r in ler(achar(p, "vsr", True)):
         vsr[mes_da_linha(r)].append((num(r.get("vsr_avista")), num(r.get("vsr_poupanca"))))
@@ -336,7 +773,7 @@ def carregar_entradas(pasta, data_base, feriados):
         c, a = dirs[mod].get(mes_da_linha(r), [0.0, 0.0])
         dirs[mod][mes_da_linha(r)] = [c + num(r.get("captacao")), a + num(r.get("aplicacao"))]
     params = json.loads((p / "parametros.json").read_text(encoding="utf-8")) if (p / "parametros.json").exists() else {}
-    return ops, parcelas, libs, cenario, realizado, vsr, lca, dict(dirs), params, avisos
+    return ops, parcelas, libs, cenario, realizado, vsr, lca, dict(dirs), params, avisos, classif
 
 
 # ---------------------------------------------------------------- bases de cálculo (MCR 6-2-2, 6-4-2, 6-7-4)
@@ -417,6 +854,23 @@ def acum(serie, safra, m, du):
     return s / p if p else 0.0
 
 
+def aplicar(an, d, c):
+    """Soma as aplicações de cada balde (Pronaf, Pronamp, Geral; crédito rural, CPR, faculdade), cortando cada
+    código de limite no % da sua base (LIMITES). O excesso do 3.1.40.34-5 vai para a Geral (código 3.1.30.78-8)."""
+    for k in set(BALDE[an].values()) | {v[1] for v in LIMITES.values() if v[0] == an}:
+        d[k] = 0.0
+    for cat, b in BALDE[an].items():
+        d[b] += c(f"{an}|{cat}")
+    for cod, (a, b, base, pct, exc, _) in LIMITES.items():
+        if a == an:
+            v = c(f"{an}|{cod}")
+            d["lim_" + cod] = min(v, pct * d[base])
+            d[b] += d["lim_" + cod]
+            if exc:
+                d["exc_" + cod] = v - d["lim_" + cod]
+                d[exc] += d["exc_" + cod]
+
+
 def sisex(safra, m, apl, dirs, base, du):
     """Posição do mês m nos anexos II (RO), III (Poupança) e IV (LCA)."""
     c = lambda k: acum(apl.get(k, {}), safra, m, du)
@@ -429,11 +883,10 @@ def sisex(safra, m, apl, dirs, base, du):
     ro["sub_pronaf"] = 0.35 * p + ro["capt_dir_pronaf"]                    # 6-2-10
     ro["sub_pronamp"] = 0.50 * p + ro["capt_dir_pronamp"]                  # 6-2-8
     ro["geral"] = p - 0.35 * p - 0.50 * p + ro["capt_dir_geral"]
-    ro["ap_pronaf"] = c("RO|pronaf") + min(c("RO|pronaf_ind_com"), 0.10 * ro["sub_pronaf"]) + dc("pronaf", 1)  # 6-2-10-A
-    ro["ap_pronamp"] = (c("RO|pronamp") + min(c("RO|pronamp_invest"), 0.10 * ro["sub_pronamp"])  # 6-2-9
-                        + min(c("RO|pronamp_peq_medio"), 0.10 * ro["sub_pronamp"]) + dc("pronamp", 1))  # 6-2-8-b
-    ro["ap_geral"] = (c("RO|demais") + min(c("RO|demais_abc"), 0.036 * ro["geral"])  # 6-8-8
-                      + min(c("RO|demais_pca"), 0.024 * ro["geral"]) + dc("geral", 1))  # 6-8-9
+    aplicar("RO", ro, c)
+    ro["ap_pronaf"] += dc("pronaf", 1)
+    ro["ap_pronamp"] += dc("pronamp", 1)
+    ro["ap_geral"] += dc("geral", 1)
     ro["ap_total"] = ro["ap_pronaf"] + ro["ap_geral"] + ro["ap_pronamp"]
     ro["def_pronaf"] = max(0.0, ro["sub_pronaf"] - ro["ap_pronaf"])
     ro["exc_pronaf"] = max(0.0, ro["ap_pronaf"] - ro["sub_pronaf"])
@@ -448,8 +901,10 @@ def sisex(safra, m, apl, dirs, base, du):
     po = {"vsr_media": base["vsr_poupanca"], "propria": pp, "capt_dir": dc("poup", 0)}
     po["exig_total"] = pp + po["capt_dir"]
     po["sub"] = 0.95 * pp + po["capt_dir"]                                  # 6-4-10
-    po["ap_cr"] = c("POUP|credito_rural") + dc("poup", 1)
-    po["ap_cpr"] = min(c("POUP|cpr"), 0.05 * po["exig_total"])            # 6-4-11
+    po["cpr_limite"] = 0.05 * pp                                            # 6-4-11; 2.2.40.00-2
+    po["exig_liquida"] = po["exig_total"] - dc("poup", 1)                   # 2.2.50.00-9
+    aplicar("POUP", po, c)
+    po["ap_cr"] += dc("poup", 1)
     po["ap_total"] = po["ap_cr"] + po["ap_cpr"]
     po["def_sub"] = max(0.0, po["sub"] - po["ap_cr"])
     po["exc_sub"] = max(0.0, po["ap_cr"] - po["sub"])
@@ -463,8 +918,9 @@ def sisex(safra, m, apl, dirs, base, du):
     lc["sub"] = 0.45 * lp + lc["capt_dir_cr"]                               # 6-7-7-a
     lc["faculdade"] = 0.55 * lp + lc["capt_dir_livre"]                      # 6-7-7-b
     lc["exc_ro"] = ro["exc_total"] if m[5:] == "06" else 0.0               # 6-7-9-h: excesso ao final do período
-    lc["ap_cr"] = c("LCA|credito_rural") + dc("lca_cr", 1) + lc["exc_ro"]
-    lc["ap_fac"] = min(c("LCA|faculdade") + dc("lca_livre", 1), lc["faculdade"])
+    aplicar("LCA", lc, c)
+    lc["ap_cr"] += dc("lca_cr", 1) + lc["exc_ro"]
+    lc["ap_fac"] = min(lc["ap_fac"] + dc("lca_livre", 1), lc["faculdade"])  # 3.3.40.01-1
     lc["ap_total"] = lc["ap_cr"] + lc["ap_fac"]
     lc["def_sub"] = max(0.0, lc["sub"] - lc["ap_cr"])
     lc["exc_sub"] = max(0.0, lc["ap_cr"] - lc["sub"])
@@ -486,14 +942,25 @@ def montar(pasta, data_base, tipo_if="banco"):
     db = dt(data_base) if isinstance(data_base, str) else data_base
     feriados_arq = achar(pasta, "feriados")
     feriados = {dt(r["data"]) for r in ler(feriados_arq)} if feriados_arq else set()
-    ops, parcelas, libs, cenario, realizado, vsr, lca, dirs, params, avisos = carregar_entradas(pasta, db, feriados)
+    ops, parcelas, libs, cenario, realizado, vsr, lca, dirs, params, avisos, classif = carregar_entradas(pasta, db, feriados)
     s0 = safra_de(db.strftime("%Y-%m"))
     meses_h = meses(f"{s0}-07", 24)
     res, pagos = projetar(ops, parcelas, libs, cenario, db, date(s0 + 2, 6, 30), feriados)
-    apl = defaultdict(dict, {k: dict(v) for k, v in realizado.items()})
-    for (i, m), (fo, ca, s, fat) in res.items():
-        if fo != "LIVRE":
-            apl[f"{fo}|{ca}"][m] = apl[f"{fo}|{ca}"].get(m, 0.0) + s * fat
+    apl_cod = defaultdict(lambda: defaultdict(float), {k: defaultdict(float, v) for k, v in realizado.items()})
+    for (i, m), (cod, s) in res.items():
+        if cod:
+            apl_cod[cod][m] += s
+    apl = defaultdict(dict)  # saldo x fator (ponderador da seção 4) por fonte|categoria do cálculo
+    for cod, porm in apl_cod.items():
+        r = CODIGOS[cod]
+        for m, v in porm.items():
+            k = f"{r['fonte']}|{r['cat']}"
+            apl[k][m] = apl[k].get(m, 0.0) + v * float(r["fator"] or 1)
+    for motivo, txt in (("sem código", "sem código no Documento 6 (não contam)"), ("empatada", "com regra empatada"),
+                        ("regra daria", "com código informado diferente da regra")):
+        n = sum(1 for c in classif if motivo in c[4])
+        if n:
+            avisos.append(f"{n} operações {txt}: ver classificacao.csv")
     mes_base = db.strftime("%Y-%m")
     sem_real = [m for m in meses_h if m < mes_base and not any(m in v for v in realizado.values())]
     if sem_real:
@@ -505,20 +972,78 @@ def montar(pasta, data_base, tipo_if="banco"):
              "meses": meses_h, "safras": [s0, s0 + 1], "du": {m: dias_uteis(m, feriados) for m in meses_h},
              "bases": {str(s): bases(s, vsr, lca, tipo_if, avisos) for s in (s0, s0 + 1)},
              "apl": dict(apl), "pagos": dict(pg), "dir": dirs, "params": params,
-             "grupos": list(GRUPOS), "dir_modalidades": DIR_MODALIDADES, "linhas": LINHAS, "resumo": RESUMO}
-    return dados, res, avisos
+             "grupos": list(GRUPOS), "dir_modalidades": DIR_MODALIDADES, "limites": LIMITES, "balde": BALDE, "linhas": LINHAS, "resumo": RESUMO}
+    return dados, res, avisos, classif, apl_cod
+
+
+CAB_CODIGOS = ["ano_safra", "posicao", "R_P", "anexo", "codigo", "tipo", "titulo", "saldo_medio_mes", "valor_doc6",
+               "valor_sisex", "diferenca"]
+
+
+def linhas_codigos(dados, resultado, apl_cod):
+    """Todos os códigos com valor: aplicação (média acumulada de julho até a posição, Doc 6 Anexo I 4.6-c/d),
+    ponderadores (seção 4) e as linhas de exigibilidade, limite, deficiência e excesso. valor_sisex fica para colar."""
+    tipo = {"i": "informado", "c": "calculado"}
+    out = []
+    for s, porm in resultado.items():
+        for m, v in porm.items():
+            rp = "R" if m < dados["mes_base"] else "P"
+            for cod in sorted(apl_cod):
+                r, serie = CODIGOS[cod], apl_cod[cod]
+                val = acum(serie, int(s), m, dados["du"])
+                if not val:
+                    continue
+                out.append([f"{s}/{int(s) + 1}", m, rp, r["fonte"], cod, tipo[r["tipo"]], r["titulo"],
+                            round(serie.get(m, 0.0), 2), round(val, 2), "", ""])
+                if r["ponderador"]:
+                    out.append([f"{s}/{int(s) + 1}", m, rp, r["fonte"], r["ponderador"], "calculado",
+                                f"Ponderação de {cod}: {round((float(r['fator']) - 1) * 100, 1)}% do saldo".replace(".", ","),
+                                "", round(val * (float(r["fator"]) - 1), 2), "", ""])
+            for an, linhas in LINHAS.items():
+                for k, cod, desc in linhas:
+                    out.append([f"{s}/{int(s) + 1}", m, rp, an, cod,
+                                "informado" if cod in LINHAS_INFORMADAS else "calculado", desc, "",
+                                round(v[an].get(k, 0.0), 2), "", ""])
+    return out
+
+
+def cmd_validar(rodada, arquivo_sisex, tol=1.0):
+    """Compara codigos.csv da rodada com os valores do Sisex (colunas posicao ou mes, codigo, valor)."""
+    rod = Path(rodada)
+    nossos = {(r["posicao"].strip(), r["codigo"].strip()): r for r in ler(rod / "codigos.csv" if rod.is_dir() else rod)}
+    linhas, n_ok = [], 0
+    for n, r in enumerate(ler(arquivo_sisex), start=2):
+        k = (mes_da_linha({"mes": r.get("posicao") or r.get("mes")}), r["codigo"].strip())
+        sx = num(r["valor"])
+        nosso = num(nossos[k]["valor_doc6"]) if k in nossos else 0.0
+        ok = abs(sx - nosso) <= tol
+        n_ok += ok
+        linhas.append([*k, nossos[k]["tipo"] if k in nossos else "", round(nosso, 2), round(sx, 2), round(sx - nosso, 2),
+                       "OK" if ok else "DIFERENTE"])
+    linhas.sort(key=lambda l: -abs(l[5]))
+    saida = gravar(rod.parent / f"validacao_{rod.name}.csv" if rod.is_dir() else SAIDAS / "validacao.csv",
+                   ["posicao", "codigo", "tipo", "programa", "sisex", "diferenca", "resultado"], linhas)
+    print(f"{n_ok} de {len(linhas)} códigos iguais ao Sisex (tolerância R$ {br(tol)}) -> {saida}")
+    for l in linhas[:15]:
+        if l[6] != "OK":
+            print(f"  {l[0]} {l[1]} {l[2]:9} diferença {br_mil(l[5])}")
+    return linhas
 
 
 def cmd_rodar(pasta, data_base, tipo_if="banco", rodada=None):
-    dados, res, avisos = montar(pasta, data_base, tipo_if)
+    dados, res, avisos, classif, apl_cod = montar(pasta, data_base, tipo_if)
     rodada = rodada or f"{datetime.now():%Y-%m-%d_%H%M%S}"
     destino = SAIDAS / "rodadas" / rodada  # nunca sobrescreve rodada anterior
     if destino.exists():
         sys.exit(f"rodada {rodada} já existe em {destino}; use outro --rodada")
     resultado = calcular(dados, dados["params"])
     dados["rodada"], dados["avisos"], dados["python"] = rodada, avisos, resultado
-    gravar(destino / "saldo_operacoes.csv", ["id", "mes", "fonte", "categoria", "saldo_medio"],
-           [[i, m, fo, ca, round(s, 2)] for (i, m), (fo, ca, s, _) in sorted(res.items())])
+    gravar(destino / "saldo_operacoes.csv", ["id", "mes", "fonte", "codigo", "saldo_medio"],
+           [[i, m, CODIGOS[c]["fonte"] if c else "", c, round(s, 2)] for (i, m), (c, s) in sorted(res.items())])
+    gravar(destino / "classificacao.csv", ["id", "fonte", "codigo", "tipo", "motivo", "titulo"],
+           [[i, fo, c, {"i": "informado", "c": "calculado"}.get(t, ""), mo, CODIGOS[c]["titulo"] if c else ""]
+            for i, fo, c, t, mo in classif])
+    gravar(destino / "codigos.csv", CAB_CODIGOS, linhas_codigos(dados, resultado, apl_cod))
     gravar(destino / "aplicacoes.csv", ["fonte_categoria", "mes", "saldo_medio_ponderado"],
            [[k, m, round(v, 2)] for k, porm in sorted(dados["apl"].items()) for m, v in sorted(porm.items())])
     gravar(destino / "exigibilidade.csv", ["ano_safra", "posicao", "tipo", "anexo", "codigo", "item", "valor"],
@@ -565,23 +1090,22 @@ def carregar_rodada(caminho, mes=None):
     caminho = Path(caminho)
     if caminho.is_dir():
         caminho = caminho / "saldo_operacoes.csv"
-    return {(r["id"].strip(), r["mes"].strip()): (r["fonte"].strip().upper(), r["categoria"].strip().lower(),
-                                                  num(r["saldo_medio"]))
+    return {(r["id"].strip(), r["mes"].strip()): (r["fonte"].strip().upper(), r["codigo"].strip(), num(r["saldo_medio"]))
             for r in ler(caminho) if not mes or r["mes"].strip() == mes}
 
 
 def cmd_comparar(cam_a, cam_b, mes=None, saida=None):
     linhas = comparar(carregar_rodada(cam_a, mes), carregar_rodada(cam_b, mes))
     saida = gravar(saida or SAIDAS / "diferencas.csv",
-                   ["id", "mes", "motivo", "fonte_A", "categoria_A", "saldo_A", "fonte_B", "categoria_B", "saldo_B",
+                   ["id", "mes", "motivo", "fonte_A", "codigo_A", "saldo_A", "fonte_B", "codigo_B", "saldo_B",
                     "diferenca"], linhas)
-    imp = defaultdict(float)  # impacto por fonte/categoria = soma B - soma A
+    imp = defaultdict(float)  # impacto por fonte/código = soma B - soma A
     for l in linhas:
         if l[3]:
             imp[(l[3], l[4])] -= l[5]
         if l[6]:
             imp[(l[6], l[7])] += l[8]
-    print(f"{len(linhas)} diferenças operação/mês -> {saida}\nImpacto B - A por fonte/categoria:")
+    print(f"{len(linhas)} diferenças operação/mês -> {saida}\nImpacto B - A por fonte/código:")
     for (fo, ca), v in sorted(imp.items(), key=lambda x: -abs(x[1])):
         print(f"  {fo:5} {ca:16} {br_mil(v)}")
     return linhas
@@ -711,27 +1235,29 @@ function comParametros(apl,pagos,P,M,mesBase){
 function dirFinal(dirs,P){const out={};for(const mod of D.dir_modalidades){out[mod]={};for(const m in (dirs[mod]||{}))out[mod][m]=dirs[mod][m].slice()}
   for(const mod in (P.dir||{}))for(const m in P.dir[mod]){const [c,a]=P.dir[mod][m];(out[mod]=out[mod]||{})[m]=[c*1e6,a*1e6]}return out}
 function acum(serie,s,m){let t=0,p=0;for(const k of mesesSafra(s)){if(k>m)break;const w=D.du[k]||0;t+=(serie[k]||0)*w;p+=w}return p?t/p:0}
+function aplicar(an,d,c){for(const k of Object.values(D.balde[an]))d[k]=0;for(const v of Object.values(D.limites))if(v[0]===an)d[v[1]]=0;
+  for(const cat in D.balde[an])d[D.balde[an][cat]]+=c(an+"|"+cat);
+  for(const [cod,[a,b,base,pct,exc]] of Object.entries(D.limites))if(a===an){const v=c(an+"|"+cod);d["lim_"+cod]=Math.min(v,pct*d[base]);d[b]+=d["lim_"+cod];
+    if(exc){d["exc_"+cod]=v-d["lim_"+cod];d[exc]+=d["exc_"+cod]}}}
 function sisex(s,m,apl,dirs,base){
   const c=k=>acum(apl[k]||{},s,m);const dc=(mod,i)=>{const sr={};for(const k in (dirs[mod]||{}))sr[k]=dirs[mod][k][i];return acum(sr,s,m)};
   const p=base.ro_propria;const ro={vsr_media:base.vsr_avista,propria:p,capt_dir_geral:dc("geral",0),capt_dir_pronaf:dc("pronaf",0),capt_dir_pronamp:dc("pronamp",0)};
   ro.exig_total=p+ro.capt_dir_geral+ro.capt_dir_pronaf+ro.capt_dir_pronamp;ro.sub_pronaf=0.35*p+ro.capt_dir_pronaf;ro.sub_pronamp=0.50*p+ro.capt_dir_pronamp;
   ro.geral=p-0.35*p-0.50*p+ro.capt_dir_geral;
-  ro.ap_pronaf=c("RO|pronaf")+Math.min(c("RO|pronaf_ind_com"),0.10*ro.sub_pronaf)+dc("pronaf",1);
-  ro.ap_pronamp=(c("RO|pronamp")+Math.min(c("RO|pronamp_invest"),0.10*ro.sub_pronamp)+Math.min(c("RO|pronamp_peq_medio"),0.10*ro.sub_pronamp)+dc("pronamp",1));
-  ro.ap_geral=(c("RO|demais")+Math.min(c("RO|demais_abc"),0.036*ro.geral)+Math.min(c("RO|demais_pca"),0.024*ro.geral)+dc("geral",1));
+  aplicar("RO",ro,c);ro.ap_pronaf+=dc("pronaf",1);ro.ap_pronamp+=dc("pronamp",1);ro.ap_geral+=dc("geral",1);
   ro.ap_total=ro.ap_pronaf+ro.ap_geral+ro.ap_pronamp;
   ro.def_pronaf=Math.max(0,ro.sub_pronaf-ro.ap_pronaf);ro.exc_pronaf=Math.max(0,ro.ap_pronaf-ro.sub_pronaf);
   ro.def_pronamp=Math.max(0,ro.sub_pronamp-ro.ap_pronamp);ro.exc_pronamp=Math.max(0,ro.ap_pronamp-ro.sub_pronamp);
   ro.def_geral=Math.max(0,ro.exig_total-(ro.ap_total+ro.def_pronaf+ro.def_pronamp));ro.exc_geral=Math.max(0,ro.ap_geral-ro.geral);
   ro.def_total=ro.def_geral+ro.def_pronaf+ro.def_pronamp;ro.exc_total=Math.max(0,ro.exc_pronaf+ro.exc_pronamp+ro.ap_geral-ro.geral);
   const pp=base.poup_propria;const po={vsr_media:base.vsr_poupanca,propria:pp,capt_dir:dc("poup",0)};
-  po.exig_total=pp+po.capt_dir;po.sub=0.95*pp+po.capt_dir;po.ap_cr=c("POUP|credito_rural")+dc("poup",1);po.ap_cpr=Math.min(c("POUP|cpr"),0.05*po.exig_total);
+  po.exig_total=pp+po.capt_dir;po.sub=0.95*pp+po.capt_dir;po.cpr_limite=0.05*pp;po.exig_liquida=po.exig_total-dc("poup",1);aplicar("POUP",po,c);po.ap_cr+=dc("poup",1);
   po.ap_total=po.ap_cr+po.ap_cpr;po.def_sub=Math.max(0,po.sub-po.ap_cr);po.exc_sub=Math.max(0,po.ap_cr-po.sub);
   po.def_total=Math.max(0,po.exig_total-po.ap_total);po.exc_total=Math.max(0,po.ap_total-po.exig_total);
   const lp=base.lca_propria[m]||0;const lc={lca_media:base.lca_media[m]||0,propria:lp,capt_dir_cr:dc("lca_cr",0),capt_dir_livre:dc("lca_livre",0)};
   lc.exig_total=lp+lc.capt_dir_cr+lc.capt_dir_livre;lc.sub=0.45*lp+lc.capt_dir_cr;lc.faculdade=0.55*lp+lc.capt_dir_livre;
-  lc.exc_ro=m.slice(5)==="06"?ro.exc_total:0;lc.ap_cr=c("LCA|credito_rural")+dc("lca_cr",1)+lc.exc_ro;
-  lc.ap_fac=Math.min(c("LCA|faculdade")+dc("lca_livre",1),lc.faculdade);lc.ap_total=lc.ap_cr+lc.ap_fac;
+  lc.exc_ro=m.slice(5)==="06"?ro.exc_total:0;aplicar("LCA",lc,c);lc.ap_cr+=dc("lca_cr",1)+lc.exc_ro;
+  lc.ap_fac=Math.min(lc.ap_fac+dc("lca_livre",1),lc.faculdade);lc.ap_total=lc.ap_cr+lc.ap_fac;
   lc.def_sub=Math.max(0,lc.sub-lc.ap_cr);lc.exc_sub=Math.max(0,lc.ap_cr-lc.sub);lc.def_total=Math.max(0,lc.exig_total-lc.ap_total);lc.exc_total=Math.max(0,lc.ap_total-lc.exig_total);
   return {RO:ro,POUP:po,LCA:lc}}
 function calcular(P){const apl=comParametros(D.apl,D.pagos,P,D.meses,D.mes_base);const dirs=dirFinal(D.dir,P);const out={};
@@ -793,37 +1319,52 @@ def html(dados):
 def cmd_exemplo(data_base="2026-11-02"):
     ex = PASTA_SCRIPT / "exemplo"
     ex.mkdir(exist_ok=True)
-    cats = [("RO", "pronaf", 3.0, "1,37"), ("RO", "pronaf_ind_com", 4.0, ""), ("RO", "pronamp", 8.0, ""),
-            ("RO", "pronamp_invest", 8.0, ""), ("RO", "demais", 10.0, ""), ("RO", "demais_abc", 8.5, ""),
-            ("POUP", "credito_rural", 11.0, ""), ("POUP", "cpr", 12.0, ""), ("LCA", "credito_rural", 12.0, ""),
-            ("LCA", "faculdade", 13.0, ""), ("LIVRE", "livre", 15.0, "")]
-    tam = {"pronaf": 30e6, "pronamp": 45e6, "demais": 14e6, "credito_rural": 42e6}
+    # fonte, programa, finalidade, recursos, beneficiario, linha, data de contratação, taxa, tamanho
+    tipos = [("RO", "pronaf", "custeio", "", "", "", "2026-08-10", 3.0, 30e6),
+             ("RO", "pronaf", "custeio", "", "", "", "2025-09-15", 5.0, 20e6),
+             ("RO", "pronaf", "comercializacao", "", "", "", "2026-09-01", 4.0, 2e6),
+             ("RO", "pronamp", "custeio", "", "", "", "2026-08-05", 8.0, 45e6),
+             ("RO", "pronamp", "investimento", "", "", "", "2025-10-20", 8.0, 2e6),
+             ("RO", "pronamp", "custeio", "", "", "peq_medio", "2026-07-15", 10.0, 3e6),
+             ("RO", "demais", "custeio", "", "", "", "2026-07-20", 10.0, 14e6),
+             ("RO", "demais", "investimento", "", "", "abc", "2023-09-01", 8.5, 2e6),
+             ("RO", "pronaf", "investimento", "", "", "", "2026-08-01", 3.0, 1e6),  # sem código no Doc 6
+             ("POUP", "pronaf", "custeio", "controlados", "", "", "2026-08-20", 3.0, 20e6),
+             ("POUP", "demais", "custeio", "nao_controlados", "", "", "2026-09-10", 11.0, 22e6),
+             ("POUP", "", "", "", "", "cpr", "2026-10-01", 12.0, 2e6),
+             ("LCA", "", "custeio", "controlados", "", "", "2026-08-12", 12.0, 42e6),
+             ("LCA", "", "investimento", "nao_controlados", "", "", "2025-11-03", 13.0, 5e6),
+             ("LCA", "", "", "", "", "cpr", "2026-10-15", 13.0, 2e6),
+             ("LIVRE", "", "", "", "", "", "2026-08-01", 15.0, 2e6)]
+    cab = ["id", "fonte", "programa", "finalidade", "recursos", "beneficiario", "linha", "data_contratacao", "taxa_aa",
+           "codigo", "saldo"]
     ops, parc = [], []
-    for k in range(60):
-        fo, ca, tx, fat = cats[k % len(cats)]
-        s = tam.get(ca, 2e6) * (1 + (k * 37 % 11) / 10)
+    for k in range(64):
+        fo, pr, fi, rc, be, li, dc, tx, tam = tipos[k % len(tipos)]
+        s = tam * (1 + (k * 37 % 11) / 10)
         i = f"OP{k + 1:03d}"
-        ops.append([i, fo, ca, s, tx, fat])
+        ops.append([i, fo, pr, fi, rc, be, li, dc, tx, "3.1.13.44-4" if k == 1 else "", s])  # OP002: código informado
         venc = meses("2027-02", 16)[k * 7 % 16]
-        if ca in ("pronamp_invest", "demais_abc"):  # investimento: parcelas anuais
-            parc += [[i, f"{venc}-10", s / 3 * 1.1], [i, f"{int(venc[:4]) + 1}{venc[4:]}-10", s / 3 * 1.1],
-                     [i, f"{int(venc[:4]) + 2}{venc[4:]}-10", s / 3 * 1.1]]
+        if fi == "investimento":  # parcelas anuais
+            parc += [[i, f"{int(venc[:4]) + j}{venc[4:]}-10", s / 3 * 1.1] for j in range(3)]
         else:
             parc.append([i, f"{venc}-15", s * 1.08])
-    gravar(ex / "operacoes.csv", ["id", "fonte", "categoria", "saldo", "taxa_aa", "fator"], ops)
-    gravar(ex / "liberacoes.csv", ["id", "data", "valor", "fonte", "categoria", "taxa_aa", "fator"],
-           [["OP003", "2026-12-01", 2e6, "", "", "", ""],
-            ["NOVA01", "2027-01-11", 30e6, "RO", "pronamp", 8.0, ""], ["NOVA02", "2027-03-01", 25e6, "POUP", "credito_rural", 11.0, ""]])
+    gravar(ex / "operacoes.csv", cab, ops)
+    gravar(ex / "liberacoes.csv", ["id", "data", "valor"] + cab[1:9],
+           [["OP003", "2026-12-01", 2e6] + [""] * 8,
+            ["NOVA01", "2027-01-11", 30e6, "RO", "pronamp", "custeio", "", "", "", "", 8.0],
+            ["NOVA02", "2027-03-01", 25e6, "POUP", "demais", "custeio", "controlados", "", "", "", 11.0]])
     gravar(ex / "parcelas.csv", ["id", "data", "valor"], parc + [["NOVA01", "2027-12-15", 32e6], ["NOVA02", "2028-02-15", 27e6]])
-    gravar(ex / "cenario.csv", ["tipo", "id", "data", "fonte", "categoria"],
-           [["liquidacao", "OP009", "2027-01-20", "", ""], ["reclassificacao", "OP005", "2027-02-10", "RO", "demais"]])
+    gravar(ex / "cenario.csv", ["tipo", "id", "data", "codigo"],
+           [["liquidacao", "OP009", "2027-01-20", ""], ["reclassificacao", "OP005", "2027-02-10", "3.1.41.52-6"]])
     gravar(ex / "feriados.csv", ["data"], [["2026-11-20"], ["2026-12-25"], ["2027-01-01"], ["2027-04-21"], ["2027-12-25"]])
     tot = defaultdict(float)
-    for i, fo, ca, s, tx, fat in ops:
-        if fo != "LIVRE":
-            tot[(fo, ca, fat)] += s
-    gravar(ex / "realizado.csv", ["mes", "fonte", "categoria", "saldo_medio", "fator"],
-           [[m, fo, ca, v * (0.85 + 0.04 * j), fat] for j, m in enumerate(meses("2026-07", 4)) for (fo, ca, fat), v in tot.items()])
+    for o in ops:
+        cod, _ = ler_classificacao(dict(zip(cab, map(str, o))), "exemplo")
+        if cod:
+            tot[cod] += o[-1]
+    gravar(ex / "realizado.csv", ["mes", "codigo", "saldo_medio"],
+           [[m, cod, v * (0.85 + 0.04 * j)] for j, m in enumerate(meses("2026-07", 4)) for cod, v in sorted(tot.items())])
     gravar(ex / "vsr.csv", ["mes", "vsr_avista", "vsr_poupanca", "tipo"],
            [[m, 2.2e9 + j * 4e6, 2.4e8 + j * 1e6, "R" if m < "2026-11" else "P"] for j, m in enumerate(meses("2025-07", 36))])
     # LCA: saldo diário realizado (coluna data) e, para os meses projetados, uma linha por mês (coluna mes)
@@ -869,13 +1410,20 @@ def autoteste():
     r = sisex(2026, "2026-09", apl, {}, base, du)["RO"]
     check("excesso Pronaf cobre falta na Geral (Sisex 5.1.51)", perto(r["def_total"], 0) and perto(r["exc_total"], 0)
           and perto(r["def_geral"], 0) and perto(r["exc_pronaf"], 10))
-    apl["RO|pronamp_invest"] = serie(20.0)
+    apl["RO|3.1.41.39-9"] = serie(20.0)
     r = sisex(2026, "2026-09", apl, {}, base, du)["RO"]
     check("investimento Pronamp limitado a 10% da sub", perto(r["ap_pronamp"], 55))
     r = sisex(2026, "2026-09", apl, {"geral": serie([30.0, 0.0]), "pronaf": serie([0.0, 8.0])}, base, du)["RO"]
     check("captação DIR soma na exigibilidade e aplicação DIR cumpre", perto(r["exig_total"], 130) and perto(r["ap_pronaf"], 53))
-    po = sisex(2026, "2026-09", {"POUP|credito_rural": serie(90.0), "POUP|cpr": serie(20.0)}, {}, base, du)["POUP"]
-    check("Poupança: CPR até 5% e crédito rural mínimo de 95%", perto(po["ap_total"], 95) and perto(po["def_sub"], 5))
+    po = sisex(2026, "2026-09", {"POUP|credito_rural": serie(90.0), "POUP|3.2.30.10-7": serie(20.0)},
+               {"poup": serie([10.0, 0.0])}, base, du)["POUP"]
+    check("Poupança: CPR até 5% da própria (3.2.30.10-7) e crédito rural mínimo de 95%",
+          perto(po["ap_cpr"], 5) and perto(po["ap_total"], 95) and perto(po["def_sub"], 15))
+    r = sisex(2026, "2026-09", {"RO|pronamp": serie(50.0), "RO|3.1.40.34-5": serie(20.0)}, {}, base, du)["RO"]
+    check("peq./médios até 10% do Pronamp; o excesso vai para a Geral (3.1.40.34-5 e 3.1.30.78-8)",
+          perto(r["ap_pronamp"], 55) and perto(r["ap_geral"], 15))
+    r = sisex(2026, "2026-09", {"RO|3.1.12.09-8": serie(30.0)}, {}, base, du)["RO"]
+    check("Res. 5.330 no Pronaf até 40% da sub (3.1.12.09-8)", perto(r["ap_pronaf"], 14))
     apl2 = {"RO|demais": serie(30.0), "RO|pronaf": serie(35.0), "RO|pronamp": serie(50.0)}
     du12 = {m: 20 for m in meses("2026-07", 12)}
     lc_mai = sisex(2026, "2027-05", apl2, {}, base, du12)["LCA"]
@@ -885,27 +1433,63 @@ def autoteste():
           perto(acum({"2026-07": 10.0, "2026-08": 40.0}, 2026, "2026-08", {"2026-07": 10, "2026-08": 30}), 32.5))
 
     # projeção
-    op = lambda: {"A": {"fonte": "POUP", "categoria": "credito_rural", "saldo": 100.0, "taxa_aa": 0.0, "fator": 1.0}}
+    op = lambda: {"A": {"codigo": "3.2.12.07-7", "saldo": 100.0, "taxa_aa": 0.0}}
     res, pagos = projetar(op(), [("A", date(2026, 12, 15), 100.0)], [], [], date(2026, 11, 2), date(2027, 1, 31))
     du_dez = dias_uteis("2026-12", set())
     uteis_ate_14 = sum(1 for k in range(1, 15) if date(2026, 12, k).weekday() < 5)
     check("saldo zero depois da liquidação (Doc 6, Anexo I, 4.6-b)",
-          perto(res[("A", "2026-12")][2], 100.0 * uteis_ate_14 / du_dez) and ("A", "2027-01") not in res)
+          perto(res[("A", "2026-12")][1], 100.0 * uteis_ate_14 / du_dez) and ("A", "2027-01") not in res)
     check("pagamento entra no total pago do grupo", perto(pagos[("POUP", "2026-12")], 100.0))
-    cen = [{"tipo": "reclassificacao", "id": "A", "data": date(2026, 12, 10), "fonte": "RO", "categoria": "demais"},
-           {"tipo": "reclassificacao", "id": "A", "data": date(2027, 1, 20), "fonte": "LCA", "categoria": "credito_rural"}]
+    cen = [{"tipo": "reclassificacao", "id": "A", "data": date(2026, 12, 10), "codigo": "3.1.31.07-9"},
+           {"tipo": "reclassificacao", "id": "A", "data": date(2027, 1, 20), "codigo": "3.3.30.68-1"}]
     res, _ = projetar(op(), [], [], cen, date(2026, 11, 2), date(2027, 2, 28))
     check("fonte do dia 15 vale para o mês inteiro (Doc 6, Anexo I, 12.2-b)",
-          res[("A", "2026-12")][:2] == ["RO", "demais"] and res[("A", "2027-01")][:2] == ["RO", "demais"]
-          and res[("A", "2027-02")][:2] == ["LCA", "credito_rural"])
-    libs = [("N", date(2027, 1, 18), 50.0, {"fonte": "RO", "categoria": "pronaf", "taxa_aa": 0.0, "fator": 1.0})]
+          res[("A", "2026-12")][0] == "3.1.31.07-9" and res[("A", "2027-01")][0] == "3.1.31.07-9"
+          and res[("A", "2027-02")][0] == "3.3.30.68-1")
+    libs = [("N", date(2027, 1, 18), 50.0, {"codigo": "3.1.13.49-9", "taxa_aa": 0.0})]
     res, _ = projetar({}, [], libs, [], date(2026, 11, 2), date(2027, 2, 28))
     uteis_jan_apos = sum(1 for k in range(18, 32) if date(2027, 1, k).weekday() < 5)
     check("liberação futura: zero antes da liberação",
-          perto(res[("N", "2027-01")][2], 50.0 * uteis_jan_apos / dias_uteis("2027-01", set()))
-          and perto(res[("N", "2027-02")][2], 50.0))
+          perto(res[("N", "2027-01")][1], 50.0 * uteis_jan_apos / dias_uteis("2027-01", set()))
+          and perto(res[("N", "2027-02")][1], 50.0))
     res, _ = projetar({"A": dict(op()["A"], taxa_aa=10.0)}, [], [], [], date(2026, 1, 1), date(2026, 12, 31))
-    check("juros sobem o saldo cerca de 10% ao ano", 100 < res[("A", "2026-12")][2] < 110.1)
+    check("juros sobem o saldo cerca de 10% ao ano", 100 < res[("A", "2026-12")][1] < 110.1)
+
+    # classificação no código do Documento 6
+    cl = lambda **k: classificar(dict({"fonte": "RO", "programa": "", "finalidade": "", "recursos": "",
+                                       "beneficiario": "produtor", "linha": "", "taxa_aa": 0.0}, **k))[0]
+    check("Pronaf custeio 2026/27 até 3% a.a. -> 3.1.13.49-9 (Sisex calcula), ponderador 37% (4.1.34.19-2)",
+          cl(programa="pronaf", finalidade="custeio", data_contratacao="2026-08-10", taxa_aa=3.0) == "3.1.13.49-9"
+          and CODIGOS["3.1.13.49-9"]["tipo"] == "c" and CODIGOS["3.1.13.49-9"]["fator"] == "1.37"
+          and CODIGOS["3.1.13.49-9"]["ponderador"] == "4.1.34.19-2")
+    check("Pronaf custeio 2026/27 acima de 3% -> 3.1.13.50-9 (demais operações)",
+          cl(programa="pronaf", finalidade="custeio", data_contratacao="2026-08-10", taxa_aa=3.5) == "3.1.13.50-9")
+    check("Geral custeio 2023/24 -> 3.1.30.45-8 (a instituição informa)",
+          cl(programa="demais", finalidade="custeio", data_contratacao="2024-03-01") == "3.1.30.45-8"
+          and CODIGOS["3.1.30.45-8"]["tipo"] == "i")
+    check("Pronaf investimento 2026/27 não tem código no Anexo II",
+          cl(programa="pronaf", finalidade="investimento", data_contratacao="2026-08-01") == "")
+    check("Pronamp investimento entra no limite 3.1.41.39-9",
+          CODIGOS[cl(programa="pronamp", finalidade="investimento", data_contratacao="2026-09-01")]["cat"] == "3.1.41.39-9")
+    check("Poupança custeio não controlado 2026/27 -> 3.2.12.18-7; LCA CPR 2026/27 -> 3.3.30.76-0 (faculdade)",
+          cl(fonte="POUP", finalidade="custeio", recursos="nao_controlados", beneficiario="",
+             data_contratacao="2026-09-10") == "3.2.12.18-7"
+          and cl(fonte="LCA", linha="cpr", beneficiario="", data_contratacao="2026-10-15") == "3.3.30.76-0"
+          and CODIGOS["3.3.30.76-0"]["cat"] == "faculdade")
+    dup = []
+    for r in REGRAS:  # uma operação típica de cada regra tem que cair só nela
+        de = r["de"] or (str(int(r["ate"][:4]) - 1) + r["ate"][4:] if r["ate"] else "2000-01-01")
+        ate = r["ate"] or "2027-06-30"
+        meio = (date.fromisoformat(de) + (date.fromisoformat(ate) - date.fromisoformat(de)) / 2).isoformat()
+        o = {"fonte": r["fonte"], "linha": r["linha"], "data_contratacao": meio,
+             "taxa_aa": float(r["taxa_max"] or (float(r["taxa_min"]) + 1 if r["taxa_min"] else 10)),
+             "programa": r["programa"] or "demais", "finalidade": r["finalidade"] or "custeio",
+             "recursos": r["recursos"] or "controlados", "beneficiario": r["beneficiario"]}
+        c, emp = classificar(o)
+        if c != r["codigo"] or len(emp) > 1:
+            dup.append(r["codigo"])
+    check(f"cada um dos {len(REGRAS)} códigos de aplicação tem regra própria, sem empate" + (f" {dup}" if dup else ""),
+          not dup)
 
     # parâmetros da gerência
     M = meses("2026-07", 6)
@@ -931,7 +1515,7 @@ def autoteste():
 
 def menu():
     print(f"\nExigibilidade v{VERSAO}\n  1 autoteste\n  2 exemplo (dados inventados)\n  3 rodar com as entradas reais\n"
-          "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)")
+          "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)\n  6 validar uma rodada com o Sisex")
     e = input("Número: ").strip()
     if e == "1":
         return ["autoteste"]
@@ -945,6 +1529,8 @@ def menu():
     if e == "5":
         return ["estrutura", input("Pasta da projeção atual: ").strip().strip('"'),
                 "--mascarar", input("Nomes a esconder, separados por vírgula (Enter = nenhum): ").strip()]
+    if e == "6":
+        return ["validar", input("Pasta da rodada: ").strip().strip('"'), input("Arquivo com os valores do Sisex: ").strip().strip('"')]
     sys.exit("opção inválida")
 
 
@@ -965,6 +1551,9 @@ def main(argv=None):
     s.add_argument("a")
     s.add_argument("b")
     s.add_argument("--mes")
+    s = sub.add_parser("validar")
+    s.add_argument("rodada")
+    s.add_argument("sisex")
     s = sub.add_parser("estrutura")
     s.add_argument("caminhos", nargs="+")
     s.add_argument("--mascarar", default="")
@@ -984,6 +1573,8 @@ def main(argv=None):
         cmd_rodar(a.entradas, a.data_base, a.tipo_if, a.rodada)
     elif a.cmd == "comparar":
         cmd_comparar(a.a, a.b, a.mes)
+    elif a.cmd == "validar":
+        cmd_validar(a.rodada, a.sisex)
     elif a.cmd == "estrutura":
         cmd_estrutura(a.caminhos, a.mascarar)
     return 0

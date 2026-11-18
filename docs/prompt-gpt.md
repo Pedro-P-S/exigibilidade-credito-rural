@@ -17,14 +17,14 @@ Responda em português, curto, numerado:
 3. Premissas fixas escondidas em fórmulas (percentuais, prazos, constantes).
 4. Pontos frágeis: valores digitados no meio de fórmulas, referências que podem quebrar, somas que podem contar algo duas vezes.
 5. Uma tabela de-para entre essa estrutura e estes arquivos de entrada:
-   operacoes (id; fonte; categoria; saldo; taxa_aa; fator)
+   operacoes (id; saldo; taxa_aa; colunas de classificação)
    parcelas (id; data; valor)
-   liberacoes (id; data; valor; fonte; categoria; taxa_aa; fator)
-   realizado (mes; fonte; categoria; saldo_medio; fator)
+   liberacoes (id; data; valor; e, para operação nova, taxa_aa e colunas de classificação)
+   realizado (mes; codigo; saldo_medio)  valor de cada código do Documento 6 no Sisex
    vsr (mes; vsr_avista; vsr_poupanca)
    lca (data ou mes; saldo)
    dir (mes; modalidade; captacao; aplicacao)  modalidade = geral, pronaf, pronamp, poup, lca_cr, lca_livre
-   fonte = RO, POUP, LCA ou LIVRE. Categorias: RO: pronaf, pronaf_ind_com, pronamp, pronamp_invest, pronamp_peq_medio, demais, demais_abc, demais_pca; POUP: credito_rural, cpr; LCA: credito_rural, faculdade; LIVRE: livre.
+   Colunas de classificação (operacoes e liberacoes): fonte (RO, POUP, LCA, LIVRE); programa (pronaf, pronamp, demais); finalidade (custeio, investimento, comercializacao, industrializacao); data_contratacao; recursos (controlados, nao_controlados); beneficiario (produtor, cooperativa, cooperativa_cooperados, cooperativa_servicos); linha (vazio ou caso especial do MCR: abc, pca, peq_medio, proagro, renegociacao, res_5330, desclassificada, cpr, cra, cdca etc.); codigo (opcional: código do Documento 6, se já existir).
 
 Não peça valores. Se algo não der para saber pela estrutura, liste como pergunta com a resposta que você recomenda.
 
@@ -38,14 +38,13 @@ Não peça valores. Se algo não der para saber pela estrutura, liste como pergu
 ```
 Escreva consultas SQL (Oracle) que gerem estes CSVs, a partir das tabelas e colunas abaixo (só nomes e tipos, sem dados):
 
-operacoes.csv: id; fonte; categoria; saldo; taxa_aa; fator  (uma linha por operação com saldo na data-base)
+operacoes.csv: id; fonte; programa; finalidade; data_contratacao; recursos; beneficiario; linha; codigo; taxa_aa; saldo  (uma linha por operação com saldo na data-base)
 parcelas.csv: id; data; valor  (parcelas futuras)
-liberacoes.csv: id; data; valor; fonte; categoria; taxa_aa; fator  (liberações futuras já previstas na base)
-realizado.csv: mes; fonte; categoria; saldo_medio; fator  (meses do ano-safra antes da data-base; saldo médio = soma dos saldos dos dias úteis / dias úteis do mês, com zero antes da 1ª liberação e depois da liquidação; fonte e categoria = as do dia 15 do mês)
+liberacoes.csv: id; data; valor; fonte; programa; finalidade; data_contratacao; recursos; beneficiario; linha; codigo; taxa_aa  (liberações futuras já previstas na base; colunas de classificação só para operação nova)
 
-Regras: fonte = RO, POUP, LCA ou LIVRE; categoria conforme a lista (RO: pronaf, pronaf_ind_com, pronamp, pronamp_invest, pronamp_peq_medio, demais, demais_abc, demais_pca; POUP: credito_rural, cpr; LCA: credito_rural, faculdade; LIVRE: livre). Use :data_base como parâmetro.
+Valores aceitos: fonte RO, POUP, LCA ou LIVRE; programa pronaf, pronamp ou demais; finalidade custeio, investimento, comercializacao ou industrializacao; recursos controlados ou nao_controlados (só Poupança e LCA); beneficiario produtor, cooperativa, cooperativa_cooperados ou cooperativa_servicos; linha vazia, ou o caso especial do MCR (abc, pca, peq_medio, proagro, renegociacao, res_5330, desclassificada, cpr, cra, cdca e os outros do README). Use :data_base como parâmetro.
 Para cada consulta, dê também uma checagem que imprima só OK/FALHOU (ex.: soma do saldo do CSV = soma da tabela de origem), nunca o valor.
-Se faltar um mapeamento (por exemplo, código de fonte para fonte/categoria), pergunte em lista numerada com a sua recomendação.
+Se faltar um mapeamento (por exemplo, de origem ou linha de crédito para programa, finalidade ou linha), pergunte em lista numerada com a sua recomendação.
 
 <TABELAS>
 (cole nomes de tabelas e colunas, com tipos)
@@ -54,9 +53,22 @@ Se faltar um mapeamento (por exemplo, código de fonte para fonte/categoria), pe
 
 ## 3. Explicar a diferença entre duas rodadas
 
-Rode `python exigibilidade.py comparar <rodada A> <rodada B>` e cole só o bloco "Impacto B - A por fonte/categoria" **se os valores puderem sair do trabalho**; se não, cole só os nomes das fontes/categorias e a contagem por motivo.
+Rode `python exigibilidade.py comparar <rodada A> <rodada B>` e cole só o bloco "Impacto B - A por fonte/código" **se os valores puderem sair do trabalho**; se não, cole só os códigos e a contagem por motivo.
 
 ```
 Comparei duas rodadas da projeção operação a operação (comando comparar). Os motivos são: mudou_saldo, mudou_classificacao, so_na_A, so_na_B.
 Me diga, em ordem, o que verificar para explicar a diferença e que consulta rodar em cada passo. Comece pela fonte que mais mudou.
+```
+
+## 4. Conferir a classificação contra o de-para que já existe
+
+Rode a projeção com a coluna `codigo` preenchida pelo de-para de origem que já existe. O `classificacao.csv` marca `informado (regra daria X)` onde a regra do MCR discorda. Conte as linhas por par (código do de-para, código da regra), sem id nem valor, e cole:
+
+```
+Comparei a classificação de operações de crédito rural no código do MCR Documento 6 feita por um de-para antigo com a feita por regras tiradas do título de cada código. Abaixo, cada par (código do de-para; código da regra; quantidade de operações).
+Para cada par, diga em uma linha qual coluna da operação provavelmente explica a diferença (programa, finalidade, data de contratação, taxa, recursos, beneficiário ou linha especial) e que consulta fazer para confirmar. Não peça valores.
+
+<PARES>
+(cole aqui)
+</PARES>
 ```
