@@ -1,78 +1,72 @@
 # Exigibilidade do Crédito Rural
 
-Calcula o **realizado** e a **projeção** dos saldos aplicados em crédito rural frente às exigibilidades do Manual de Crédito Rural (MCR, capítulo 6): Recursos Obrigatórios, Poupança Rural e LCA, com as subexigibilidades.
+Calcula o **realizado** e a **projeção** das exigibilidades do crédito rural na forma do **MCR - Documento 6**: Anexo II (Recursos Obrigatórios, MCR 6-2), Anexo III (Poupança Rural, MCR 6-4) e Anexo IV (LCA, MCR 6-7). DIR, Pronaf, Pronamp e limites ficam dentro de cada anexo.
 
-- Programa: [exigibilidade.py](exigibilidade.py), arquivo único, só biblioteca padrão do Python (o comando `estrutura` usa `openpyxl` para ler Excel).
-- Regras: MCR Atualização nº 760 (22/10/2026).
-- Prompt para usar com um assistente de IA só de chat: [docs/prompt-gpt.md](docs/prompt-gpt.md).
-- Todos os números de exemplo e dos testes são inventados.
+Gera a **posição de cada mês** (média acumulada de julho até o mês, como o Sisex) do ano-safra atual e do seguinte inteiro, e um **HTML** com:
+- **Visão geral** (diretores): sobra ou falta no fechamento de junho e mês a mês;
+- **Detalhe dos anexos** (gestores): as linhas com os códigos do Documento 6;
+- **Parâmetros e simulação** (gestores): liberação, % de reembolso, prazo e DIR por mês. Recalcula na hora e salva os parâmetros para a próxima rodada.
 
-## O que faz
-
-| Comando | O que faz |
-|---|---|
-| `autoteste` | Testa as regras com dados inventados. Grava `resumo_verificacao.txt`, que tem que terminar com `RESULTADO: TUDO OK`. |
-| `exemplo` | Gera dados inventados em `exemplo/` e roda o fluxo inteiro. |
-| `projetar` | Projeta o saldo de cada operação dia a dia até a liquidação (parcelas, juros, cenários) e tira o saldo médio mensal. Cada rodada vai para uma pasta própria em `saidas/rodadas/` e nunca é sobrescrita. |
-| `calcular` | Junta realizado e projetado e calcula exigido, aplicado e sobra/falta por fonte e subexigibilidade, mês a mês (média acumulada), até junho e no ano-safra seguinte. |
-| `comparar` | Compara duas rodadas operação a operação: o que mudou de saldo, de fonte/categoria, o que entrou e o que saiu. |
-| `estrutura` | Lê uma projeção existente (Excel, código) e gera um `.md` só com a estrutura: abas, cabeçalhos e fórmulas, sem valores. |
+Programa: [exigibilidade.py](exigibilidade.py), arquivo único, só biblioteca padrão do Python (Excel `.xlsx` precisa do `openpyxl`). Regras: MCR Atualização nº 760 (22/10/2026). Todos os números de exemplo e dos testes são inventados. Prompts para um assistente de IA só de chat: [docs/prompt-gpt.md](docs/prompt-gpt.md).
 
 ## Passo a passo
 
 1. Crie uma pasta, por exemplo `C:\exigibilidade`.
 2. No GitHub, abra `exigibilidade.py`, clique em **Raw**, `Ctrl+A`, `Ctrl+C`. Cole no Bloco de Notas e salve como `exigibilidade.py` na pasta, em **UTF-8**.
-3. Teste. No Spyder, abra o arquivo e aperte **F5**: aparece um menu, digite `1`. No terminal: `python exigibilidade.py autoteste`.
-4. Rode o exemplo: menu `2`, ou `python exigibilidade.py exemplo`. Veja os arquivos em `exemplo\` e `saidas\`.
-5. Gere os arquivos de entrada a partir das suas consultas, no formato abaixo, e rode:
+3. Teste: no Spyder, abra o arquivo, aperte **F5** e digite `1`. No terminal: `python exigibilidade.py autoteste`. O `resumo_verificacao.txt` tem que terminar com `RESULTADO: TUDO OK`.
+4. Exemplo: menu `2` ou `python exigibilidade.py exemplo`. Abra o `relatorio.html` em `saidas\rodadas\exemplo_...\`. No topo tem que aparecer `CHECK simulação = Python: OK`.
+5. Dados reais: monte uma pasta de entradas (formatos abaixo, mesmo nome de arquivo do `exemplo\`) e rode:
    ```
-   python exigibilidade.py projetar operacoes.csv parcelas.csv --data-base 2026-11-20 --ate 2028-06-30 --cenario cenario.csv --feriados feriados.csv
-   python exigibilidade.py calcular captacoes.csv aplicacoes_realizado.csv saidas\rodadas\<rodada>\aplicacoes_projetadas.csv
-   python exigibilidade.py comparar saidas\rodadas\<rodada_A>\saldo_operacoes.csv saidas\rodadas\<rodada_B>\saldo_operacoes.csv
+   python exigibilidade.py rodar C:\exigibilidade\entradas --data-base 2026-11-20
    ```
-   No Spyder: `runfile('exigibilidade.py', args='autoteste')`.
+   Cada rodada vai para `saidas\rodadas\<data_hora>\` e nunca é sobrescrita.
+6. Comparar duas rodadas operação a operação (o que mudou de saldo, fonte/categoria, entrou ou saiu):
+   ```
+   python exigibilidade.py comparar saidas\rodadas\<rodada_A> saidas\rodadas\<rodada_B>
+   ```
 
-## Formato dos arquivos de entrada
+## Arquivos de entrada (pasta de entradas)
 
-CSV com `;` ou `,`, número com vírgula ou ponto decimal, data `AAAA-MM-DD` ou `DD/MM/AAAA`. Mês é `AAAA-MM`.
+CSV, TXT (separador `;` `,` tab ou `|`) ou XLSX (1ª aba). Número com vírgula ou ponto decimal; data `AAAA-MM-DD` ou `DD/MM/AAAA`; mês `AAAA-MM`.
 
-**Fonte e categoria** (o que cada saldo cumpre):
+| Arquivo | Obrigatório | Colunas | Uma linha por |
+|---|---|---|---|
+| `operacoes` | sim | `id`, `fonte`, `categoria`, `saldo` (na data-base), `taxa_aa` (% a.a.), `fator` (ponderador, vazio = 1) | operação |
+| `parcelas` | sim | `id`, `data`, `valor` | parcela futura; a última liquida |
+| `liberacoes` | não | `id`, `data`, `valor`; para operação nova também `fonte`, `categoria`, `taxa_aa`, `fator` | liberação futura que vem da base |
+| `realizado` | não | `mes`, `fonte`, `categoria`, `saldo_medio`, `fator` | mês antes da data-base, fonte e categoria |
+| `vsr` | sim | `mes` (ou `data`), `vsr_avista`, `vsr_poupanca` | apuração do VSR (realizada ou projetada) |
+| `lca` | sim | `data` (saldo diário) ou `mes` (saldo médio do mês projetado), `saldo` | dia ou mês |
+| `dir` | não | `mes`, `modalidade`, `captacao`, `aplicacao` (saldo médio do mês) | mês e modalidade |
+| `cenario` | não | `tipo` (`liquidacao` ou `reclassificacao`), `id`, `data`, `fonte`, `categoria` | ajuste numa operação |
+| `feriados` | não | `data` | feriado (dia útil = segunda a sexta fora dos feriados) |
+| `parametros.json` | não | salvo pelo botão do HTML | parâmetros da gerência |
 
-| fonte | categorias |
-|---|---|
-| `RO` (Recursos Obrigatórios, MCR 6-2) | `pronamp`, `pronamp_invest`, `pronaf`, `pronaf_ind_com`, `outras` |
-| `POUP` (Poupança Rural, MCR 6-4) | `credito_rural`, `cpr` |
-| `LCA` (MCR 6-7) | `credito_rural`, `faculdade` |
-| `LIVRE` (não cumpre exigibilidade) | `livre` |
+**Fonte e categoria:**
 
-| Arquivo | Colunas | Uma linha por |
+| fonte | categorias | limite |
 |---|---|---|
-| `operacoes.csv` | `id`, `fonte`, `categoria`, `saldo` (na data-base), `taxa_aa` (% a.a.), `fator` (ponderador do MCR, vazio = 1) | operação |
-| `parcelas.csv` | `id`, `data`, `valor` | parcela futura; a última liquida a operação |
-| `cenario.csv` | `tipo`, `id`, `data`, `valor`, `fonte`, `categoria`, `pct`, `taxa_aa` | ajuste manual (abaixo) |
-| `feriados.csv` | `data` | feriado (dia útil = segunda a sexta fora dos feriados) |
-| `captacoes.csv` | `mes`, `dias_uteis`, `vsr_avista`, `vsr_poupanca`, `saldo_lca`, `tipo` (`R` realizado, `P` projetado) | mês, desde o início do período de cálculo |
-| `aplicacoes_*.csv` | `mes`, `fonte`, `categoria`, `saldo_medio`, `fator`, `tipo` | mês, fonte e categoria |
+| `RO` | `pronaf`, `pronaf_ind_com` | ind./com. até 10% da sub Pronaf |
+| | `pronamp`, `pronamp_invest`, `pronamp_peq_medio` | investimento e pequenos/médios até 10% da sub Pronamp, cada |
+| | `demais`, `demais_abc`, `demais_pca` | ABC/RenovAgro até 3,6% e PCA até 2,4% da Geral |
+| `POUP` | `credito_rural`, `cpr` | CPR até 5% |
+| `LCA` | `credito_rural`, `faculdade` | faculdade até 55% |
+| `LIVRE` | `livre` | não cumpre exigibilidade |
 
-**Cenários** (`cenario.csv`, coluna `tipo`):
-
-| tipo | preencha | efeito |
-|---|---|---|
-| `liberacao` | `id`, `data`, `valor`, `fonte`, `categoria`, `taxa_aa` | soma ao saldo; `id` novo cria a operação (as parcelas dela vão no `parcelas.csv`) |
-| `pct_pagamento` | `data`, `pct`, `fonte` e `categoria` opcionais | a partir da data, só `pct`% de cada parcela é pago; o resto fica no saldo |
-| `liquidacao` | `id`, `data` | zera a operação na data |
-| `reclassificacao` | `id`, `data`, `fonte`, `categoria` | a partir da data o saldo conta na nova fonte/categoria |
+**DIR, modalidades:** `geral`, `pronaf`, `pronamp`, `poup`, `lca_cr`, `lca_livre`. A captação soma na exigibilidade e a aplicação conta no cumprimento.
 
 ## Regras implementadas
 
-- **Saldo médio mensal:** média do saldo dos dias úteis. No mês em que a operação liquida, ela entra com o último saldo do mês anterior.
-- **Recursos Obrigatórios:** 31,5% de (média do VSR à vista de julho a junho − R$ 500 mi); cooperativas 13% em 2026/27 e 22% em 2027/28. Isenta se ≤ R$ 10 mi. Subexigibilidade Pronamp 50% (até 10% dela com investimento Pronamp) e Pronaf 35% (até 10% dela com industrialização/comercialização).
-- **Poupança Rural:** 70% da média do VSR; no mínimo 95% em crédito rural e até 5% em CPR.
-- **LCA:** 60% de (média do saldo de LCA de junho a maio − R$ 500 mi), isenta se ≤ R$ 10 mi; no mínimo 45% em crédito rural, até 55% em faculdades, e o excesso de Recursos Obrigatórios também conta.
-- **Ponderadores** (ex. 1,37 do Pronaf custeio): vêm na coluna `fator`.
+- **Saldo médio do mês:** soma dos saldos dos dias úteis ÷ dias úteis do mês. Conta zero antes da 1ª liberação e depois da liquidação (Doc 6, Anexo I, 4.6-b).
+- **Fonte do mês:** a fonte e a categoria que a operação tinha no **dia 15** valem para o mês inteiro (Doc 6, Anexo I, 12.2-b).
+- **Posição do mês:** média acumulada de julho até o mês, ponderada pelos dias úteis (Doc 6, Anexo I, 4.6-c/d).
+- **Anexo II (RO):** própria = 31,5% × (média do VSR à vista de jul a jun do ano anterior − R$ 500 mi), cooperativas 13% em 2026/27 e 22% em 2027/28, isenta se ≤ R$ 10 mi. Pronaf 35%, Pronamp 50%, Geral = o resto, cada uma + captação DIR. Deficiência e excesso separados (códigos 5.1.x); o excesso de Pronaf e Pronamp cobre a Geral.
+- **Anexo III (Poupança):** 70% da média do VSR; no mínimo 95% em crédito rural; CPR até 5%.
+- **Anexo IV (LCA):** 60% × (média acumulada das LCA de junho até o mês anterior à posição − R$ 500 mi), isenta se ≤ R$ 10 mi; 45% em crédito rural e 55% de faculdade. O excesso de RO entra só na posição de junho (MCR 6-7-9-h).
+- **Parâmetros da gerência** (grupos RO-Pronaf, RO-Pronamp, RO-Demais, Poupança e LCA, por mês, em R$ mi): a liberação entra no meio do mês e volta em parcela única depois do prazo; o % de reembolso deixa o que não foi pago no saldo até o fim do horizonte. Só valem a partir do mês da data-base.
 
-**Ainda não trata:** custo financeiro da deficiência (MCR 6-5), limites de normas transitórias (MCR 6-8), limite de 10% de pequenos e médios no Pronamp, juros pela regra exata de cada contrato (usa juros compostos por dia corrido).
+**Ainda não trata:** custo financeiro da deficiência (MCR 6-5); renegociações da Res. 2.238 (limite de 60%) e outras normas transitórias (MCR 6-8); juros pela regra exata de cada contrato (usa juros compostos por dia corrido); o mês da data-base usa o saldo da data-base nos dias úteis anteriores a ela.
 
 ## O que é público e o que não é
 
-Só vão para o GitHub este README, o `exigibilidade.py` e o `docs/prompt-gpt.md`. O `.gitignore` bloqueia todo o resto (dados, saídas, exemplos, notas). Nada de dado real, nome de sistema, tabela ou pessoa aqui.
+Só vão para o GitHub este README, o `exigibilidade.py` e o `docs/prompt-gpt.md`. O `.gitignore` bloqueia todo o resto (entradas, saídas, exemplos, notas). Nada de dado real, nome de sistema, tabela ou pessoa aqui.
