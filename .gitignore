@@ -1,0 +1,7 @@
+# Nunca vai para o GitHub: dados, saídas, contexto interno e configuração local
+*
+!.gitignore
+!README.md
+!exigibilidade.py
+!docs/
+!docs/prompt-gpt.md
