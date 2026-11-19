@@ -765,11 +765,11 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
     dia útil sem linha (Doc 6, Anexo I, 4.6-b). Código do mês = regra aplicada à linha do último dia útil até o dia
     15, pois a situação não muda em dia não útil (Doc 6, Anexo I, 12.2-b). O 12.2-b não trata a operação que não
     existe no dia 15; decisão do usuário (ADR 0006): contratada depois do dia 15 fica com a fonte da contratação (1ª
-    linha do mês) e encerrada antes do dia 15 fica com a fonte do dia 15 do mês anterior. Linha em dia não útil é
-    ignorada.
+    linha do mês) e encerrada antes do dia 15 fica com a fonte do dia 15 do mês anterior; contratada e encerrada no
+    mesmo mês fica fora, como o Sisex faz. Linha em dia não útil é ignorada.
     """
     ini = date(safra_de(data_base.strftime("%Y-%m")), 7, 1)
-    cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota da linha do código, código, último dia com linha]
+    cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota da linha do código, código, último dia com linha, contratação]
     fora, sem = 0, set()
     chave = ("fonte", "programa", "finalidade", "recursos", "beneficiario", "linha", "data_contratacao", "taxa_aa", "codigo")
     for n, r in enumerate(linhas, start=2):
@@ -780,7 +780,7 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
             fora += 1
             continue
         k = (r["id"].strip(), d.strftime("%Y-%m"))
-        a = acc.setdefault(k, [0.0, -99, "", 0])
+        a = acc.setdefault(k, [0.0, -99, "", 0, (r.get("data_contratacao") or "").strip()])
         a[0] += num(r["saldo"])
         a[3] = max(a[3], d.day)
         # vale o dia mais perto do 15 por baixo; contratada depois do dia 15 fica com a 1ª linha do mês (ADR 0006)
@@ -792,17 +792,25 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
             a[1:3] = nota, cache[c][0]
             if cache[c][1].startswith("sem código"):
                 sem.add(k[0])
-    du, d15, hist = {}, {}, {}
-    for (i, m), (soma, _, cod, ultimo) in sorted(acc.items(), key=lambda x: x[0][1]):
+    du, d15, dfim, hist, no_mes = {}, {}, {}, {}, set()
+    for (i, m), (soma, _, cod, ultimo, dc) in sorted(acc.items(), key=lambda x: x[0][1]):
         if m not in du:
             du[m] = dias_uteis(m, feriados)
-            d15[m] = max(d for d in (date(int(m[:4]), int(m[5:]), k) for k in range(1, 16))
-                         if d.weekday() < 5 and d not in feriados)
+            a, mm = int(m[:4]), int(m[5:])
+            uteis = [d for d in (date(a, mm, k) for k in range(1, calendar.monthrange(a, mm)[1] + 1))
+                     if d.weekday() < 5 and d not in feriados]
+            d15[m], dfim[m] = max(d for d in uteis if d.day <= 15), uteis[-1]
         anterior = hist.get((i, mes_anterior(m)))
-        if ultimo < d15[m].day and d15[m] < data_base and anterior:  # encerrada antes do dia 15 (ADR 0006)
+        encerrada = (i, meses(m, 2)[1]) not in acc and d15[m] < data_base
+        if dc and mes_da_linha({"data": dc}) == m and ultimo < dfim[m].day and dfim[m] < data_base and encerrada:
+            no_mes.add(i)  # contratada e encerrada no mesmo mês: o Sisex não conta (ADR 0006)
+            continue
+        if ultimo < d15[m].day and encerrada and anterior:  # encerrada antes do dia 15 (ADR 0006)
             cod = anterior[0]
         hist[(i, m)] = [cod, soma / du[m]]
     avisos = [f"saldos_diarios: {fora} linhas em dia não útil ignoradas"] if fora else []
+    if no_mes:
+        avisos.append(f"saldos_diarios: {len(no_mes)} operações contratadas e encerradas no mesmo mês ficaram fora (ADR 0006)")
     if sem:
         avisos.append(f"saldos_diarios: {len(sem)} operações sem código no Documento 6 em algum mês (não contam)")
     return hist, avisos
@@ -1683,6 +1691,9 @@ def autoteste():
                               date(2026, 11, 2))
     check("encerrada antes do dia 15: código do dia 15 do mês anterior (ADR 0006)",
           enc[("A", "2026-09")][0] == "3.1.13.49-9")
+    mm, _ = realizado_diario([dict(dia(date(2026, 9, k), "pronaf"), data_contratacao="2026-09-02") for k in (2, 3, 4)],
+                             date(2026, 11, 2))
+    check("contratada e encerrada no mesmo mês: o Sisex não conta o saldo (ADR 0006)", ("A", "2026-09") not in mm)
     linhas = [dict(dia(date(2026, 11, k), "pronaf", 50.0), id="B") for k in (2, 3, 4)]
     hist, _ = realizado_diario(linhas, date(2026, 11, 5))
     res, _ = projetar({"B": {"codigo": "3.1.30.45-8", "saldo": 50.0, "taxa_aa": 0.0}}, [], [], [], date(2026, 11, 5),
