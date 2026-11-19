@@ -10,9 +10,10 @@ Comandos:
   python exigibilidade.py rodar PASTA_ENTRADAS --data-base AAAA-MM-DD [--tipo-if banco|cooperativa] [--rodada NOME]
   python exigibilidade.py comparar RODADA_A RODADA_B [--mes AAAA-MM]   (pastas ou saldo_operacoes.csv)
   python exigibilidade.py estrutura ARQUIVO_OU_PASTA [...] [--mascarar "NOME1,NOME2"]
+  python exigibilidade.py extrair --data-base AAAA-MM-DD   lê o banco do trabalho (consultas_banco.ini, só leitura)
 
 Sem argumentos (F5 no Spyder) abre um menu. Saídas em saidas/ ao lado do script. Só biblioteca padrão
-(Excel .xlsx precisa do openpyxl). Arquivos de entrada: README.md. Regras: MCR Atualização nº 760 (22/10/2026).
+(Excel .xlsx precisa do openpyxl; o banco do trabalho, do pyodbc). Arquivos de entrada: README.md. Regras: MCR Atualização nº 760 (22/10/2026).
 """
 import argparse
 import calendar
@@ -24,7 +25,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.4.0"
+VERSAO = "0.5.0"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1329,6 +1330,190 @@ def cmd_estrutura(caminhos, mascarar="", saida=None):
     return saida
 
 
+# ---------------------------------------------------------------- extração do banco do trabalho (só leitura)
+# Lê o banco por ODBC (pyodbc) e grava os CSVs de entrada numa pasta local. Não usa rede além da conexão ao banco,
+# não grava usuário nem senha e só aceita consultas de leitura.
+
+CONFIG_BANCO = PASTA_SCRIPT / "consultas_banco.ini"  # fica só no computador do trabalho; nunca vai para o GitHub
+PARAMETROS_SQL = re.compile(r":(data_base|inicio_safra|inicio_anterior)\b")
+COLUNAS_OBRIGATORIAS = {"operacoes": {"id", "saldo", "fonte"}, "saldos_diarios": {"id", "data", "saldo", "fonte"},
+                        "parcelas": {"id", "data", "valor"}, "liberacoes": {"id", "data", "valor"},
+                        "vsr": {"vsr_avista", "vsr_poupanca"}, "lca": {"saldo"},
+                        "dir": {"mes", "modalidade", "captacao", "aplicacao"}, "feriados": {"data"}}
+MODELO_CONFIG = """\
+# Consultas ao banco do trabalho para o exigibilidade.py (menu 6 ou: python exigibilidade.py extrair --data-base AAAA-MM-DD).
+# ESTE ARQUIVO FICA SÓ NESTE COMPUTADOR: não mande para o GitHub nem cole em assistente de IA.
+#
+# 1. Em [conexao], o texto de conexão ODBC SEM usuário e senha (o programa pede numa janela e não grava).
+# 2. Em cada arquivo, depois de "sql =", um SELECT (ou WITH) só de leitura. Cada linha da consulta começa com espaço.
+#    Renomeie as colunas com AS para os nomes do README (ex.: t.NUMERO AS id). Termine sem ponto e vírgula.
+# 3. Parâmetros que o programa preenche: :data_base, :inicio_safra (1º de julho do ano-safra da data-base) e
+#    :inicio_anterior (1º de julho do ano-safra anterior).
+# 4. Arquivo que não vai usar: deixe "sql = PREENCHER". Obrigatórios: operacoes, parcelas, vsr, lca.
+
+[conexao]
+# ex.: DRIVER={Nome do driver Oracle};DBQ=servidor:porta/servico   ou   DSN=nome_da_fonte_odbc
+texto = PREENCHER
+
+[operacoes]
+# id; saldo (na data-base); taxa_aa; fonte; programa; finalidade; data_contratacao; recursos; beneficiario; linha; codigo
+sql = PREENCHER
+
+[saldos_diarios]
+# id; data; saldo; e as mesmas colunas de classificação, com o valor de cada dia; de :inicio_safra até antes de :data_base
+sql = PREENCHER
+
+[parcelas]
+# id; data; valor  (parcelas futuras, data >= :data_base)
+sql = PREENCHER
+
+[liberacoes]
+# id; data; valor; para operação nova também taxa_aa e as colunas de classificação
+sql = PREENCHER
+
+[vsr]
+# mes (ou data); vsr_avista; vsr_poupanca  (a partir de :inicio_anterior)
+sql = PREENCHER
+
+[lca]
+# data (saldo diário) ou mes (saldo médio projetado); saldo
+sql = PREENCHER
+
+[dir]
+# mes; modalidade (geral, pronaf, pronamp, poup, lca_cr, lca_livre); captacao; aplicacao
+sql = PREENCHER
+
+[feriados]
+# data
+sql = PREENCHER
+"""
+
+
+def checar_sql(sql):
+    """Recusa o que não for uma consulta de leitura: tem de começar com SELECT ou WITH, ser uma só e não ter comando
+    que altere o banco (nem SELECT ... FOR UPDATE)."""
+    limpo = re.sub(r"--[^\n]*|/\*.*?\*/", " ", sql, flags=re.S).strip()
+    if not re.match(r"(?i)(select|with)\b", limpo) or ";" in limpo:
+        raise ValueError("só uma consulta SELECT/WITH, sem ponto e vírgula")
+    proibido = re.search(r"(?i)\b(insert|update|delete|merge|drop|alter|create|truncate|grant|revoke|rename|exec|"
+                         r"execute|call|begin|declare|commit|rollback|lock)\b", limpo)
+    if proibido:
+        raise ValueError(f"a consulta tem '{proibido.group(1)}': só leitura é aceita")
+    return limpo
+
+
+def _celula(v):
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    return v.isoformat() if isinstance(v, date) else str(v)
+
+
+def extrair(con, consultas, data_base, destino):
+    """Roda cada consulta (DB-API, parâmetros ?) e grava destino/<nome>.csv. Devolve {nome: linhas}."""
+    s0 = safra_de(data_base.strftime("%Y-%m"))
+    valores = {"data_base": data_base, "inicio_safra": date(s0, 7, 1), "inicio_anterior": date(s0 - 1, 7, 1)}
+    cur, out = con.cursor(), {}
+    for nome, sql in consultas.items():
+        limpo = checar_sql(sql)
+        cur.execute(PARAMETROS_SQL.sub("?", limpo), [valores[p] for p in PARAMETROS_SQL.findall(limpo)])
+        cab = [c[0].strip().lower() for c in cur.description]
+        falta = COLUNAS_OBRIGATORIAS.get(nome, set()) - set(cab)
+        if falta:
+            raise ValueError(f"{nome}: faltam as colunas {', '.join(sorted(falta))} (renomeie com AS)")
+        with open(destino / f"{nome}.csv", "w", newline="", encoding="utf-8") as f:
+            w, n = csv.writer(f, delimiter=";"), 0
+            w.writerow(cab)
+            while lote := cur.fetchmany(10000):  # linha a linha em lotes: saldos_diarios pode ter milhões
+                w.writerows([_celula(v) for v in l] for l in lote)
+                n += len(lote)
+        out[nome] = n
+    return out
+
+
+def pedir_login():
+    """Usuário e senha numa janela (senha com *). Nada é gravado; sem janela, pergunta no console."""
+    try:
+        import tkinter as tk
+        r, res = tk.Tk(), {}
+        r.title("Banco do trabalho")
+        r.attributes("-topmost", True)
+        campos = []
+        for j, rotulo in enumerate(("Usuário", "Senha")):
+            tk.Label(r, text=rotulo).grid(row=j, column=0, padx=8, pady=4, sticky="e")
+            campos.append(tk.Entry(r, show="*" if j else ""))
+            campos[-1].grid(row=j, column=1, padx=8, pady=4)
+
+        def entrar(_=None):
+            res["u"], res["s"] = campos[0].get().strip(), campos[1].get()
+            r.destroy()
+        tk.Button(r, text="Entrar", command=entrar).grid(row=2, column=1, padx=8, pady=8, sticky="e")
+        r.bind("<Return>", entrar)
+        campos[0].focus_force()
+        r.mainloop()
+    except Exception:  # sem interface gráfica: console, com a senha escondida
+        import getpass
+        return input("Usuário: ").strip(), getpass.getpass("Senha: ")
+    if not res:
+        sys.exit("login cancelado")
+    return res["u"], res["s"]
+
+
+def conectar_banco(texto):
+    try:
+        import pyodbc
+    except ImportError:
+        sys.exit("para ler o banco instale o pyodbc (pip install pyodbc)")
+    usuario, senha = pedir_login()
+    chave = lambda v: "{" + v.replace("}", "}}") + "}"  # usuário/senha com ; ou } não quebram o texto de conexão
+    try:
+        con = pyodbc.connect(f"{texto.strip().rstrip(';')};UID={chave(usuario)};PWD={chave(senha)}",
+                             autocommit=False, readonly=True, timeout=30)
+    except pyodbc.Error as e:
+        sys.exit("não conectou ao banco: " + (str(e).replace(senha, "***") if senha else str(e)))
+    return con
+
+
+def ler_config_banco(caminho):
+    import configparser
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.read(caminho, encoding="utf-8")
+    texto = cp.get("conexao", "texto", fallback="").strip()
+    if not texto or texto.startswith("PREENCHER"):
+        sys.exit(f"preencha [conexao] texto em {caminho}")
+    consultas = {s: cp[s]["sql"].strip() for s in cp.sections() if s != "conexao" and cp[s].get("sql", "").strip()
+                 and not cp[s]["sql"].strip().startswith("PREENCHER")}
+    return texto, consultas
+
+
+def cmd_extrair(data_base):
+    if not CONFIG_BANCO.exists():
+        CONFIG_BANCO.write_text(MODELO_CONFIG, encoding="utf-8")
+        sys.exit(f"Criei {CONFIG_BANCO}. Preencha a conexão e as consultas (instruções no arquivo) e rode de novo.")
+    texto, consultas = ler_config_banco(CONFIG_BANCO)
+    for nome, sql in consultas.items():  # confere tudo antes de pedir a senha
+        try:
+            checar_sql(sql)
+        except ValueError as e:
+            sys.exit(f"{CONFIG_BANCO.name} [{nome}]: {e}")
+    db = dt(data_base)
+    destino = PASTA_SCRIPT / "entradas" / db.isoformat()
+    destino.mkdir(parents=True, exist_ok=True)  # oficial.csv e parametros.json que estiverem lá continuam
+    con = conectar_banco(texto)
+    try:
+        n = extrair(con, consultas, db, destino)
+    except ValueError as e:
+        sys.exit(str(e))
+    finally:
+        con.rollback()
+        con.close()
+    for nome in sorted(set(n) | {"operacoes", "parcelas", "vsr", "lca"}):
+        print(f"CHECK {nome}: {n.get(nome, 0)} linhas {'OK' if n.get(nome) else 'FALHOU'}")
+    print(f"\nEntradas em {destino}. Ponha lá o oficial.csv e o parametros.json, se tiver, e rode o menu 3.")
+    return destino
+
+
 # ---------------------------------------------------------------- relatório HTML (visão dos diretores + gestores)
 
 CSS = r"""
@@ -1793,6 +1978,28 @@ def autoteste():
     check("parâmetro da gerência não mexe em mês realizado",
           com_parametros({}, {}, {"liberacao": {"LCA": {"2026-07": 1}}}, M, "2026-08").get("LCA|credito_rural") == {})
 
+    # extração do banco (só leitura), testada com sqlite3 no lugar do Oracle
+    import sqlite3
+    import tempfile
+    sqlite3.register_adapter(date, date.isoformat)
+    con = sqlite3.connect(":memory:")
+    con.execute("create table t (cod text, dia text, valor real)")
+    con.executemany("insert into t values (?, ?, ?)", [("A", "2026-10-30", 10.5), ("A", "2026-11-03", 7.0)])
+    with tempfile.TemporaryDirectory() as tmp:
+        ok_ext = extrair(con, {"parcelas": "SELECT cod AS ID, dia AS data, valor FROM t WHERE dia >= :data_base"},
+                         date(2026, 11, 2), Path(tmp))
+        lido = list(ler(Path(tmp) / "parcelas.csv"))
+    check("extração grava o CSV com as colunas da consulta e usa a data-base como parâmetro",
+          ok_ext == {"parcelas": 1} and lido == [{"id": "A", "data": "2026-11-03", "valor": "7.0"}])
+    recusa = []
+    for sql in ("DELETE FROM t", "SELECT 1 FROM t; DROP TABLE t", "UPDATE t SET valor = 0", "select 1 -- ok\n; delete from t"):
+        try:
+            checar_sql(sql)
+        except ValueError:
+            recusa.append(sql)
+    check("extração só aceita uma consulta SELECT/WITH (nada que altere o banco)", len(recusa) == 4
+          and con.execute("select count(*) from t").fetchone()[0] == 2)
+
     # comparação
     a = {("1", "m"): ("RO", "pronaf", 10.0), ("2", "m"): ("RO", "pronamp", 5.0), ("3", "m"): ("POUP", "cpr", 1.0)}
     b2 = {("1", "m"): ("RO", "pronaf", 12.0), ("2", "m"): ("RO", "pronaf", 5.0), ("4", "m"): ("LCA", "faculdade", 7.0)}
@@ -1806,7 +2013,7 @@ def autoteste():
 
 def menu():
     print(f"\nExigibilidade v{VERSAO}\n  1 autoteste\n  2 exemplo (dados inventados)\n  3 rodar com as entradas reais\n"
-          "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)")
+          "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)\n  6 extrair do banco do trabalho")
     e = input("Número: ").strip()
     if e == "1":
         return ["autoteste"]
@@ -1820,6 +2027,8 @@ def menu():
     if e == "5":
         return ["estrutura", input("Pasta da projeção atual: ").strip().strip('"'),
                 "--mascarar", input("Nomes a esconder, separados por vírgula (Enter = nenhum): ").strip()]
+    if e == "6":
+        return ["extrair", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
     sys.exit("opção inválida")
 
 
@@ -1840,6 +2049,8 @@ def main(argv=None):
     s.add_argument("a")
     s.add_argument("b")
     s.add_argument("--mes")
+    s = sub.add_parser("extrair")
+    s.add_argument("--data-base", required=True)
     s = sub.add_parser("estrutura")
     s.add_argument("caminhos", nargs="+")
     s.add_argument("--mascarar", default="")
@@ -1859,6 +2070,8 @@ def main(argv=None):
         cmd_rodar(a.entradas, a.data_base, a.tipo_if, a.rodada)
     elif a.cmd == "comparar":
         cmd_comparar(a.a, a.b, a.mes)
+    elif a.cmd == "extrair":
+        cmd_extrair(a.data_base)
     elif a.cmd == "estrutura":
         cmd_estrutura(a.caminhos, a.mascarar)
     return 0

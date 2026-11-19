@@ -36,7 +36,7 @@ Não peça valores. Se algo não der para saber pela estrutura, liste como pergu
 ## 2. Montar as consultas que geram os arquivos de entrada
 
 ```
-Escreva consultas SQL (Oracle) que gerem estes CSVs, a partir das tabelas e colunas abaixo (só nomes e tipos, sem dados):
+Escreva um SELECT (Oracle) para cada um destes arquivos, a partir das tabelas e colunas abaixo (só nomes e tipos, sem dados). Cada SELECT vai colado no consultas_banco.ini do programa, que roda a consulta e grava o CSV: só leitura, sem ponto e vírgula no fim, colunas renomeadas com AS para os nomes abaixo, parâmetros :data_base, :inicio_safra (1º de julho do ano-safra) e :inicio_anterior (1º de julho do ano-safra anterior):
 
 operacoes.csv: id; fonte; programa; finalidade; data_contratacao; recursos; beneficiario; linha; codigo; taxa_aa; saldo  (uma linha por operação com saldo na data-base)
 saldos_diarios.csv: id; data; saldo; fonte; programa; finalidade; data_contratacao; recursos; beneficiario; linha; codigo; taxa_aa  (uma linha por operação por dia útil com saldo, de 1º de julho do ano-safra da :data_base até o dia útil anterior à :data_base; as colunas de classificação com o valor que a operação tinha NAQUELE dia, não o de hoje)
@@ -45,7 +45,7 @@ liberacoes.csv: id; data; valor; fonte; programa; finalidade; data_contratacao; 
 
 Regras do saldos_diarios: dia útil = segunda a sexta fora dos feriados; dia sem saldo não precisa de linha (o programa conta zero); o programa usa a linha do último dia útil até o dia 15 de cada mês para achar o código do mês, por isso a classificação tem de ser a do dia, vinda do histórico, nunca a atual repetida. Se a base só guarda a classificação atual, diga isso em vez de inventar.
 
-Valores aceitos: fonte RO, POUP, LCA ou LIVRE; programa pronaf, pronamp ou demais; finalidade custeio, investimento, comercializacao ou industrializacao; recursos controlados ou nao_controlados (só Poupança e LCA); beneficiario produtor, cooperativa, cooperativa_cooperados ou cooperativa_servicos; linha vazia, ou o caso especial do MCR (abc, pca, peq_medio, proagro, renegociacao, res_5330, desclassificada, cpr, cra, cdca e os outros do README). Use :data_base como parâmetro.
+Valores aceitos: fonte RO, POUP, LCA ou LIVRE; programa pronaf, pronamp ou demais; finalidade custeio, investimento, comercializacao ou industrializacao; recursos controlados ou nao_controlados (só Poupança e LCA); beneficiario produtor, cooperativa, cooperativa_cooperados ou cooperativa_servicos; linha vazia, ou o caso especial do MCR (abc, pca, peq_medio, proagro, renegociacao, res_5330, desclassificada, cpr, cra, cdca e os outros do README). 
 Para cada consulta, dê também uma checagem que imprima só OK/FALHOU, nunca o valor. No mínimo:
 - soma do saldo do CSV = soma da tabela de origem;
 - saldos_diarios sem linha repetida para o mesmo id e data;
