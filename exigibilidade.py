@@ -24,7 +24,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.3.0"
+VERSAO = "0.4.0"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
