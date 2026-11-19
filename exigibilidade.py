@@ -536,16 +536,17 @@ def ler(caminho):
             import openpyxl
         except ImportError:
             sys.exit(f"{caminho}: para ler Excel instale o openpyxl (pip install openpyxl) ou salve como CSV")
-        linhas = list(openpyxl.load_workbook(caminho, read_only=True, data_only=True).worksheets[0]
-                      .iter_rows(values_only=True))
-        cab = [str(c or "").strip().lower() for c in linhas[0]]
-        return [{k: "" if v is None else (v.isoformat() if hasattr(v, "isoformat") else str(v)) for k, v in zip(cab, l)}
-                for l in linhas[1:] if any(v is not None for v in l)]
-    with open(caminho, encoding="utf-8-sig", newline="") as f:
+        linhas = openpyxl.load_workbook(caminho, read_only=True, data_only=True).worksheets[0].iter_rows(values_only=True)
+        cab = [str(c or "").strip().lower() for c in next(linhas)]
+        yield from ({k: "" if v is None else (v.isoformat() if hasattr(v, "isoformat") else str(v)) for k, v in zip(cab, l)}
+                    for l in linhas if any(v is not None for v in l))
+        return
+    with open(caminho, encoding="utf-8-sig", newline="") as f:  # linha a linha: saldos_diarios pode ter milhões
         amostra = f.read(4096)
         f.seek(0)
         sep = max(";,\t|", key=amostra.count)
-        return [{(k or "").strip().lower(): v for k, v in r.items()} for r in csv.DictReader(f, delimiter=sep)]
+        for r in csv.DictReader(f, delimiter=sep):
+            yield {(k or "").strip().lower(): v for k, v in r.items()}
 
 
 def achar(pasta, nome, obrigatorio=False):
@@ -647,13 +648,15 @@ def ler_classificacao(r, onde, data_padrao=None):
 
 # ---------------------------------------------------------------- projeção operação a operação
 
-def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset()):
+def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset(), hist=None):
     """Saldo diário de cada operação até a liquidação.
 
     Devolve (res, pagos): res = {(id, mes): [codigo, saldo_medio]}, pagos = {(grupo, mes): valor}.
     Saldo médio = soma dos saldos dos dias úteis / dias úteis do mês, com zero antes da 1ª liberação e depois da
     liquidação (Doc 6, Anexo I, 4.6-b). O código do mês é o do dia 15 (Doc 6, Anexo I, 12.2-b).
+    hist: saída de realizado_diario; dá os dias úteis do mês da data-base antes dela e o código até ali.
     """
+    hist = hist or {}
     ops = {k: dict(v) for k, v in ops.items()}
     pag = defaultdict(dict)
     for i, d, v in parcelas:
@@ -689,9 +692,9 @@ def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset())
         fat_dia = (1 + op["taxa_aa"] / 100) ** (1 / 365)  # shortcut: juros compostos por dia corrido; ajustar à regra real
         soma, cls = defaultdict(float), {}
         m0 = data_base.strftime("%Y-%m")
-        cls[m0] = cod
-        # shortcut: dias úteis do mês da data-base antes dela entram com o saldo da data-base
-        soma[m0] += saldo * sum(1 for k in range(1, data_base.day) if util(data_base.replace(day=k)))
+        h = hist.get((i, m0))
+        cls[m0] = h[0] if h else cod
+        soma[m0] += h[1] * n_uteis(m0) if h else 0.0  # dias antes da data-base sem linha no saldo diário = zero
         ult_lib = max(lib[i], default=None)
         d = data_base
         while d <= ate:
@@ -720,6 +723,48 @@ def projetar(ops, parcelas, libs, cenario, data_base, ate, feriados=frozenset())
     return res, {k: v for k, v in pagos.items() if k[0]}
 
 
+def realizado_diario(linhas, data_base, feriados=frozenset()):
+    """Realizado de cada operação a partir do saldo diário (arquivo saldos_diarios).
+
+    Devolve (hist, avisos): hist = {(id, mes): [codigo, saldo_medio]} de julho do ano-safra até o mês da data-base,
+    neste só com os dias antes dela. Saldo médio = soma dos saldos dos dias úteis / dias úteis do mês, com zero no
+    dia útil sem linha (Doc 6, Anexo I, 4.6-b). Código do mês = regra aplicada à linha do último dia útil até o dia
+    15, pois a situação não muda em dia não útil (Doc 6, Anexo I, 12.2-b); operação que só aparece depois do dia 15
+    usa a 1ª linha do mês.
+    """
+    ini = date(safra_de(data_base.strftime("%Y-%m")), 7, 1)
+    cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota da linha do código, código]
+    fora, sem = 0, set()
+    chave = ("fonte", "programa", "finalidade", "recursos", "beneficiario", "linha", "data_contratacao", "taxa_aa", "codigo")
+    for n, r in enumerate(linhas, start=2):
+        d = dt(r["data"])
+        if not ini <= d < data_base:
+            continue
+        if d.weekday() > 4 or d in feriados:
+            fora += 1
+            continue
+        k = (r["id"].strip(), d.strftime("%Y-%m"))
+        a = acc.setdefault(k, [0.0, -99, ""])
+        a[0] += num(r["saldo"])
+        nota = d.day if d.day <= 15 else -d.day  # vale o dia mais perto do 15 por baixo; sem ele, o 1º do mês
+        if nota > a[1]:
+            c = tuple((r.get(x) or "").strip() for x in chave)
+            if c not in cache:  # a classificação quase não muda de um dia para o outro
+                cache[c] = ler_classificacao(r, f"saldos_diarios linha {n}")
+            a[1:] = nota, cache[c][0]
+            if cache[c][1].startswith("sem código"):
+                sem.add(k[0])
+    du = {}
+    hist = {}
+    for (i, m), (soma, _, cod) in acc.items():
+        du[m] = du.get(m) or dias_uteis(m, feriados)
+        hist[(i, m)] = [cod, soma / du[m]]
+    avisos = [f"saldos_diarios: {fora} linhas em dia não útil ignoradas"] if fora else []
+    if sem:
+        avisos.append(f"saldos_diarios: {len(sem)} operações sem código no Documento 6 em algum mês (não contam)")
+    return hist, avisos
+
+
 def carregar_entradas(pasta, data_base, feriados):
     """Lê a pasta de entradas. Detalhe dos arquivos no README."""
     p = Path(pasta)
@@ -746,16 +791,8 @@ def carregar_entradas(pasta, data_base, feriados):
         if c["tipo"] == "reclassificacao" and c["codigo"] and c["codigo"] not in CODIGOS:
             sys.exit(f"cenario linha {n}: código {c['codigo']} não é código de aplicação (vazio = sai da exigibilidade)")
         cenario.append(c)
-    mes_base = data_base.strftime("%Y-%m")
-    realizado, avisos = defaultdict(lambda: defaultdict(float)), []
-    for n, r in enumerate(ler(achar(p, "realizado")) if achar(p, "realizado") else [], start=2):
-        cod, m = r["codigo"].strip(), mes_da_linha(r)
-        if cod not in CODIGOS:
-            sys.exit(f"realizado linha {n}: código {cod} não é código de aplicação dos anexos II, III ou IV")
-        if m >= mes_base:
-            avisos.append(f"realizado linha {n}: mês {m} não é anterior à data-base; ignorado (vale a projeção)")
-        else:
-            realizado[cod][m] += num(r["saldo_medio"])
+    sd = achar(p, "saldos_diarios")
+    hist, avisos = realizado_diario(ler(sd), data_base, feriados) if sd else ({}, [])
     vsr = defaultdict(list)
     for r in ler(achar(p, "vsr", True)):
         vsr[mes_da_linha(r)].append((num(r.get("vsr_avista")), num(r.get("vsr_poupanca"))))
@@ -773,7 +810,7 @@ def carregar_entradas(pasta, data_base, feriados):
         c, a = dirs[mod].get(mes_da_linha(r), [0.0, 0.0])
         dirs[mod][mes_da_linha(r)] = [c + num(r.get("captacao")), a + num(r.get("aplicacao"))]
     params = json.loads((p / "parametros.json").read_text(encoding="utf-8")) if (p / "parametros.json").exists() else {}
-    return ops, parcelas, libs, cenario, realizado, vsr, lca, dict(dirs), params, avisos, classif
+    return ops, parcelas, libs, cenario, hist, vsr, lca, dict(dirs), params, avisos, classif
 
 
 # ---------------------------------------------------------------- bases de cálculo (MCR 6-2-2, 6-4-2, 6-7-4)
@@ -942,11 +979,12 @@ def montar(pasta, data_base, tipo_if="banco"):
     db = dt(data_base) if isinstance(data_base, str) else data_base
     feriados_arq = achar(pasta, "feriados")
     feriados = {dt(r["data"]) for r in ler(feriados_arq)} if feriados_arq else set()
-    ops, parcelas, libs, cenario, realizado, vsr, lca, dirs, params, avisos, classif = carregar_entradas(pasta, db, feriados)
+    ops, parcelas, libs, cenario, hist, vsr, lca, dirs, params, avisos, classif = carregar_entradas(pasta, db, feriados)
     s0 = safra_de(db.strftime("%Y-%m"))
     meses_h = meses(f"{s0}-07", 24)
-    res, pagos = projetar(ops, parcelas, libs, cenario, db, date(s0 + 2, 6, 30), feriados)
-    apl_cod = defaultdict(lambda: defaultdict(float), {k: defaultdict(float, v) for k, v in realizado.items()})
+    res, pagos = projetar(ops, parcelas, libs, cenario, db, date(s0 + 2, 6, 30), feriados, hist)
+    res = {**{k: v for k, v in hist.items() if v[1] > 0}, **res}  # realizado calculado + projeção
+    apl_cod = defaultdict(lambda: defaultdict(float))
     for (i, m), (cod, s) in res.items():
         if cod:
             apl_cod[cod][m] += s
@@ -962,9 +1000,10 @@ def montar(pasta, data_base, tipo_if="banco"):
         if n:
             avisos.append(f"{n} operações {txt}: ver classificacao.csv")
     mes_base = db.strftime("%Y-%m")
-    sem_real = [m for m in meses_h if m < mes_base and not any(m in v for v in realizado.values())]
+    com_saldo = {m for _, m in hist}
+    sem_real = [m for m in meses_h if m < mes_base and m not in com_saldo]
     if sem_real:
-        avisos.append(f"sem realizado para {', '.join(sem_real)}: esses meses entram com zero")
+        avisos.append(f"sem saldos_diarios para {', '.join(sem_real)}: esses meses entram com zero")
     pg = defaultdict(dict)
     for (g, m), v in pagos.items():
         pg[g][m] = v
@@ -1358,13 +1397,11 @@ def cmd_exemplo(data_base="2026-11-02"):
     gravar(ex / "cenario.csv", ["tipo", "id", "data", "codigo"],
            [["liquidacao", "OP009", "2027-01-20", ""], ["reclassificacao", "OP005", "2027-02-10", "3.1.41.52-6"]])
     gravar(ex / "feriados.csv", ["data"], [["2026-11-20"], ["2026-12-25"], ["2027-01-01"], ["2027-04-21"], ["2027-12-25"]])
-    tot = defaultdict(float)
-    for o in ops:
-        cod, _ = ler_classificacao(dict(zip(cab, map(str, o))), "exemplo")
-        if cod:
-            tot[cod] += o[-1]
-    gravar(ex / "realizado.csv", ["mes", "codigo", "saldo_medio"],
-           [[m, cod, v * (0.85 + 0.04 * j)] for j, m in enumerate(meses("2026-07", 4)) for cod, v in sorted(tot.items())])
+    # saldo diário de jul/26 até o dia útil antes da data-base, a partir da contratação, subindo até o saldo de hoje
+    dias = [d for d in (date(2026, 7, 1) + timedelta(days=k) for k in range(124)) if d.weekday() < 5]
+    gravar(ex / "saldos_diarios.csv", ["id", "data", "saldo"] + cab[1:10],
+           [[o[0], d.isoformat(), round(o[-1] * (0.85 + 0.15 * j / len(dias)), 2)] + o[1:10]
+            for o in ops for j, d in enumerate(dias) if d.isoformat() >= o[7]])
     gravar(ex / "vsr.csv", ["mes", "vsr_avista", "vsr_poupanca", "tipo"],
            [[m, 2.2e9 + j * 4e6, 2.4e8 + j * 1e6, "R" if m < "2026-11" else "P"] for j, m in enumerate(meses("2025-07", 36))])
     # LCA: saldo diário realizado (coluna data) e, para os meses projetados, uma linha por mês (coluna mes)
@@ -1454,6 +1491,26 @@ def autoteste():
           and perto(res[("N", "2027-02")][1], 50.0))
     res, _ = projetar({"A": dict(op()["A"], taxa_aa=10.0)}, [], [], [], date(2026, 1, 1), date(2026, 12, 31))
     check("juros sobem o saldo cerca de 10% ao ano", 100 < res[("A", "2026-12")][1] < 110.1)
+
+    # realizado a partir do saldo diário (Doc 6, Anexo I, 4.6-b e 12.2-b)
+    cols = {"fonte": "RO", "finalidade": "custeio", "data_contratacao": "2026-08-01", "taxa_aa": "3"}
+    dia = lambda d, prog, s=100.0: dict(cols, id="A", data=d.isoformat(), saldo=str(s), programa=prog)
+    ago = [date(2026, 8, k) for k in range(1, 32) if date(2026, 8, k).weekday() < 5]
+    linhas = [dia(d, "pronamp" if d.day < 14 or d.day > 15 else "pronaf") for d in ago]  # 15/08/2026 é sábado
+    linhas += [dia(d, "pronaf") for d in (date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3))]
+    hist, _ = realizado_diario(linhas, date(2026, 11, 2))
+    check("dia 15 num sábado usa a classificação da sexta (Doc 6, Anexo I, 12.2-b), em qualquer ordem de linhas",
+          hist[("A", "2026-08")][0] == "3.1.13.49-9" and realizado_diario(linhas[::-1], date(2026, 11, 2))[0] == hist)
+    check("operação que muda de programa depois do dia 15 fica no código antigo naquele mês",
+          hist[("A", "2026-08")][0] == "3.1.13.49-9" and perto(hist[("A", "2026-08")][1], 100.0))
+    check("dia útil sem linha conta zero (Doc 6, Anexo I, 4.6-b)",
+          perto(hist[("A", "2026-09")][1], 300.0 / dias_uteis("2026-09", set())))
+    linhas = [dict(dia(date(2026, 11, k), "pronaf", 50.0), id="B") for k in (2, 3, 4)]
+    hist, _ = realizado_diario(linhas, date(2026, 11, 5))
+    res, _ = projetar({"B": {"codigo": "3.1.30.45-8", "saldo": 50.0, "taxa_aa": 0.0}}, [], [], [], date(2026, 11, 5),
+                      date(2026, 11, 30), hist=hist)
+    check("mês da data-base: dias antes dela vêm do saldo diário; o código é o do dia 15",
+          perto(res[("B", "2026-11")][1], 50.0) and res[("B", "2026-11")][0] == "3.1.30.45-8")
 
     # classificação no código do Documento 6
     cl = lambda **k: classificar(dict({"fonte": "RO", "programa": "", "finalidade": "", "recursos": "",

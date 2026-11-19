@@ -34,7 +34,7 @@ CSV, TXT (separador `;` `,` tab ou `|`) ou XLSX (1ª aba). Número com vírgula 
 | `operacoes` | sim | `id`, `saldo` (na data-base), `taxa_aa` (% a.a.) e as colunas de classificação abaixo | operação |
 | `parcelas` | sim | `id`, `data`, `valor` | parcela futura; a última liquida |
 | `liberacoes` | não | `id`, `data`, `valor`; para operação nova também `taxa_aa` e a classificação (`data_contratacao` vazia = data da liberação) | liberação futura que vem da base |
-| `realizado` | não | `mes`, `codigo`, `saldo_medio` (o valor do código no Sisex) | mês antes da data-base e código |
+| `saldos_diarios` | não (sem ele os meses passados ficam zero) | `id`, `data`, `saldo` e as colunas de classificação daquele dia | operação e dia útil, de 1º de julho do ano-safra até o dia útil antes da data-base. É daqui que sai o realizado: saldo médio do mês = soma dos dias úteis ÷ dias úteis, dia útil sem linha = zero (Doc 6, Anexo I, 4.6-b); código do mês = regra na linha do último dia útil até o dia 15 (Anexo I, 12.2-b) |
 | `vsr` | sim | `mes` (ou `data`), `vsr_avista`, `vsr_poupanca` | apuração do VSR (realizada ou projetada) |
 | `lca` | sim | `data` (saldo diário) ou `mes` (saldo médio do mês projetado), `saldo` | dia ou mês |
 | `dir` | não | `mes`, `modalidade`, `captacao`, `aplicacao` (saldo médio do mês) | mês e modalidade |

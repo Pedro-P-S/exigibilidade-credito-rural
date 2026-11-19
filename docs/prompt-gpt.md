@@ -20,7 +20,7 @@ Responda em português, curto, numerado:
    operacoes (id; saldo; taxa_aa; colunas de classificação)
    parcelas (id; data; valor)
    liberacoes (id; data; valor; e, para operação nova, taxa_aa e colunas de classificação)
-   realizado (mes; codigo; saldo_medio)  valor de cada código do Documento 6 no Sisex
+   saldos_diarios (id; data; saldo; colunas de classificação)  uma linha por operação por dia útil desde 1º de julho
    vsr (mes; vsr_avista; vsr_poupanca)
    lca (data ou mes; saldo)
    dir (mes; modalidade; captacao; aplicacao)  modalidade = geral, pronaf, pronamp, poup, lca_cr, lca_livre
