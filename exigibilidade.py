@@ -763,10 +763,13 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
     Devolve (hist, avisos): hist = {(id, mes): [codigo, saldo_medio]} de julho do ano-safra até o mês da data-base,
     neste só com os dias antes dela. Saldo médio = soma dos saldos dos dias úteis / dias úteis do mês, com zero no
     dia útil sem linha (Doc 6, Anexo I, 4.6-b). Código do mês = regra aplicada à linha do último dia útil até o dia
-    15, pois a situação não muda em dia não útil (Doc 6, Anexo I, 12.2-b). Linha em dia não útil é ignorada.
+    15, pois a situação não muda em dia não útil (Doc 6, Anexo I, 12.2-b). O 12.2-b não trata a operação que não
+    existe no dia 15; decisão do usuário (ADR 0006): contratada depois do dia 15 fica com a fonte da contratação (1ª
+    linha do mês) e encerrada antes do dia 15 fica com a fonte do dia 15 do mês anterior. Linha em dia não útil é
+    ignorada.
     """
     ini = date(safra_de(data_base.strftime("%Y-%m")), 7, 1)
-    cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota da linha do código, código]
+    cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota da linha do código, código, último dia com linha]
     fora, sem = 0, set()
     chave = ("fonte", "programa", "finalidade", "recursos", "beneficiario", "linha", "data_contratacao", "taxa_aa", "codigo")
     for n, r in enumerate(linhas, start=2):
@@ -777,28 +780,29 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
             fora += 1
             continue
         k = (r["id"].strip(), d.strftime("%Y-%m"))
-        a = acc.setdefault(k, [0.0, -99, ""])
+        a = acc.setdefault(k, [0.0, -99, "", 0])
         a[0] += num(r["saldo"])
-        # vale o dia mais perto do 15 por baixo. shortcut: operação que só aparece depois do dia 15 usa a 1ª linha do
-        # mês; o Doc 6, Anexo I, 12.2-b não define esse caso (a rodada avisa); trocar quando o Sisex mostrar como faz
+        a[3] = max(a[3], d.day)
+        # vale o dia mais perto do 15 por baixo; contratada depois do dia 15 fica com a 1ª linha do mês (ADR 0006)
         nota = d.day if d.day <= 15 else -d.day
         if nota > a[1]:
             c = tuple((r.get(x) or "").strip() for x in chave)
             if c not in cache:  # a classificação quase não muda de um dia para o outro
                 cache[c] = ler_classificacao(r, f"saldos_diarios linha {n}")
-            a[1:] = nota, cache[c][0]
+            a[1:3] = nota, cache[c][0]
             if cache[c][1].startswith("sem código"):
                 sem.add(k[0])
-    du = {}
-    hist = {}
-    for (i, m), (soma, _, cod) in acc.items():
-        du[m] = du.get(m) or dias_uteis(m, feriados)
+    du, d15, hist = {}, {}, {}
+    for (i, m), (soma, _, cod, ultimo) in sorted(acc.items(), key=lambda x: x[0][1]):
+        if m not in du:
+            du[m] = dias_uteis(m, feriados)
+            d15[m] = max(d for d in (date(int(m[:4]), int(m[5:]), k) for k in range(1, 16))
+                         if d.weekday() < 5 and d not in feriados)
+        anterior = hist.get((i, mes_anterior(m)))
+        if ultimo < d15[m].day and d15[m] < data_base and anterior:  # encerrada antes do dia 15 (ADR 0006)
+            cod = anterior[0]
         hist[(i, m)] = [cod, soma / du[m]]
     avisos = [f"saldos_diarios: {fora} linhas em dia não útil ignoradas"] if fora else []
-    tarde = {i for (i, _), a in acc.items() if a[1] < 0}
-    if tarde:
-        avisos.append(f"saldos_diarios: {len(tarde)} operações só aparecem depois do dia 15 em algum mês; o MCR não define "
-                      "o código delas nesse mês (Doc 6, Anexo I, 12.2-b) e o programa usa o do 1º dia em que aparecem")
     if sem:
         avisos.append(f"saldos_diarios: {len(sem)} operações sem código no Documento 6 em algum mês (não contam)")
     return hist, avisos
@@ -1673,8 +1677,12 @@ def autoteste():
           and realizado_diario(linhas + [dia(date(2026, 9, 5), "pronaf")], date(2026, 11, 2))[0] == hist)
     tarde, _ = realizado_diario([dia(date(2026, 9, k), "pronaf" if k < 25 else "pronamp") for k in (21, 22, 28)],
                                 date(2026, 11, 2))
-    check("operação que só aparece depois do dia 15 usa a 1ª linha do mês (caso que o MCR não define)",
+    check("contratada depois do dia 15: código da fonte da contratação, a 1ª linha do mês (ADR 0006)",
           tarde[("A", "2026-09")][0] == "3.1.13.49-9")
+    enc, _ = realizado_diario([dia(date(2026, 8, 14), "pronaf")] + [dia(date(2026, 9, k), "pronamp") for k in (1, 2, 3)],
+                              date(2026, 11, 2))
+    check("encerrada antes do dia 15: código do dia 15 do mês anterior (ADR 0006)",
+          enc[("A", "2026-09")][0] == "3.1.13.49-9")
     linhas = [dict(dia(date(2026, 11, k), "pronaf", 50.0), id="B") for k in (2, 3, 4)]
     hist, _ = realizado_diario(linhas, date(2026, 11, 5))
     res, _ = projetar({"B": {"codigo": "3.1.30.45-8", "saldo": 50.0, "taxa_aa": 0.0}}, [], [], [], date(2026, 11, 5),
