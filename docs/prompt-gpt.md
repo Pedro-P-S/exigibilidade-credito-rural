@@ -39,11 +39,20 @@ Não peça valores. Se algo não der para saber pela estrutura, liste como pergu
 Escreva consultas SQL (Oracle) que gerem estes CSVs, a partir das tabelas e colunas abaixo (só nomes e tipos, sem dados):
 
 operacoes.csv: id; fonte; programa; finalidade; data_contratacao; recursos; beneficiario; linha; codigo; taxa_aa; saldo  (uma linha por operação com saldo na data-base)
+saldos_diarios.csv: id; data; saldo; fonte; programa; finalidade; data_contratacao; recursos; beneficiario; linha; codigo; taxa_aa  (uma linha por operação por dia útil com saldo, de 1º de julho do ano-safra da :data_base até o dia útil anterior à :data_base; as colunas de classificação com o valor que a operação tinha NAQUELE dia, não o de hoje)
 parcelas.csv: id; data; valor  (parcelas futuras)
 liberacoes.csv: id; data; valor; fonte; programa; finalidade; data_contratacao; recursos; beneficiario; linha; codigo; taxa_aa  (liberações futuras já previstas na base; colunas de classificação só para operação nova)
 
+Regras do saldos_diarios: dia útil = segunda a sexta fora dos feriados; dia sem saldo não precisa de linha (o programa conta zero); o programa usa a linha do último dia útil até o dia 15 de cada mês para achar o código do mês, por isso a classificação tem de ser a do dia, vinda do histórico, nunca a atual repetida. Se a base só guarda a classificação atual, diga isso em vez de inventar.
+
 Valores aceitos: fonte RO, POUP, LCA ou LIVRE; programa pronaf, pronamp ou demais; finalidade custeio, investimento, comercializacao ou industrializacao; recursos controlados ou nao_controlados (só Poupança e LCA); beneficiario produtor, cooperativa, cooperativa_cooperados ou cooperativa_servicos; linha vazia, ou o caso especial do MCR (abc, pca, peq_medio, proagro, renegociacao, res_5330, desclassificada, cpr, cra, cdca e os outros do README). Use :data_base como parâmetro.
-Para cada consulta, dê também uma checagem que imprima só OK/FALHOU (ex.: soma do saldo do CSV = soma da tabela de origem), nunca o valor.
+Para cada consulta, dê também uma checagem que imprima só OK/FALHOU, nunca o valor. No mínimo:
+- soma do saldo do CSV = soma da tabela de origem;
+- saldos_diarios sem linha repetida para o mesmo id e data;
+- saldos_diarios sem linha em sábado, domingo ou feriado;
+- soma do saldo do último dia útil antes da :data_base no saldos_diarios até 1% diferente da soma de operacoes.csv (a diferença normal é de juros e movimentos de um dia);
+- nenhuma linha com fonte, programa, finalidade, recursos, beneficiario ou linha fora dos valores aceitos;
+- quantas operações mudaram de programa, finalidade ou linha ao longo do período (só a contagem).
 Se faltar um mapeamento (por exemplo, de origem ou linha de crédito para programa, finalidade ou linha), pergunte em lista numerada com a sua recomendação.
 
 <TABELAS>
