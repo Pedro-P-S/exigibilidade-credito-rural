@@ -766,10 +766,12 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
     15, pois a situação não muda em dia não útil (Doc 6, Anexo I, 12.2-b). O 12.2-b não trata a operação que não
     existe no dia 15; decisão do usuário (ADR 0006): contratada depois do dia 15 fica com a fonte da contratação (1ª
     linha do mês) e encerrada antes do dia 15 fica com a fonte do dia 15 do mês anterior; contratada e encerrada no
-    mesmo mês fica fora, como o Sisex faz. Linha em dia não útil é ignorada.
+    mesmo mês fica fora, como o Sisex faz. Essas regras valem só para os códigos que o Sisex calcula (Anexo I, 12.1-a:
+    a partir de 2025/26); nos códigos informados, o saldo de cada dia vai para o código da fonte daquele dia e aparece
+    em hist[(id, mes, codigo)] quando não é o código principal do mês. Linha em dia não útil é ignorada.
     """
     ini = date(safra_de(data_base.strftime("%Y-%m")), 7, 1)
-    cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota da linha do código, código, último dia com linha, contratação]
+    cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota, código, último dia com linha, contratação, soma por código]
     fora, sem = 0, set()
     chave = ("fonte", "programa", "finalidade", "recursos", "beneficiario", "linha", "data_contratacao", "taxa_aa", "codigo")
     for n, r in enumerate(linhas, start=2):
@@ -780,26 +782,32 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
             fora += 1
             continue
         k = (r["id"].strip(), d.strftime("%Y-%m"))
-        a = acc.setdefault(k, [0.0, -99, "", 0, (r.get("data_contratacao") or "").strip()])
-        a[0] += num(r["saldo"])
+        a = acc.setdefault(k, [0.0, -99, "", 0, (r.get("data_contratacao") or "").strip(), defaultdict(float)])
+        c = tuple((r.get(x) or "").strip() for x in chave)
+        if c not in cache:  # a classificação quase não muda de um dia para o outro
+            cache[c] = ler_classificacao(r, f"saldos_diarios linha {n}")
+        saldo = num(r["saldo"])
+        a[0] += saldo
         a[3] = max(a[3], d.day)
+        a[5][cache[c][0]] += saldo
         # vale o dia mais perto do 15 por baixo; contratada depois do dia 15 fica com a 1ª linha do mês (ADR 0006)
         nota = d.day if d.day <= 15 else -d.day
         if nota > a[1]:
-            c = tuple((r.get(x) or "").strip() for x in chave)
-            if c not in cache:  # a classificação quase não muda de um dia para o outro
-                cache[c] = ler_classificacao(r, f"saldos_diarios linha {n}")
             a[1:3] = nota, cache[c][0]
             if cache[c][1].startswith("sem código"):
                 sem.add(k[0])
     du, d15, dfim, hist, no_mes = {}, {}, {}, {}, set()
-    for (i, m), (soma, _, cod, ultimo, dc) in sorted(acc.items(), key=lambda x: x[0][1]):
+    for (i, m), (soma, _, cod, ultimo, dc, por_cod) in sorted(acc.items(), key=lambda x: x[0][1]):
         if m not in du:
             du[m] = dias_uteis(m, feriados)
             a, mm = int(m[:4]), int(m[5:])
             uteis = [d for d in (date(a, mm, k) for k in range(1, calendar.monthrange(a, mm)[1] + 1))
                      if d.weekday() < 5 and d not in feriados]
             d15[m], dfim[m] = max(d for d in uteis if d.day <= 15), uteis[-1]
+        if not cod or CODIGOS[cod]["tipo"] != "c":  # código informado: saldo de cada dia na fonte do dia (ADR 0006)
+            hist[(i, m)] = [cod, por_cod.get(cod, 0.0) / du[m]]
+            hist.update({(i, m, c): [c, v / du[m]] for c, v in por_cod.items() if c and c != cod})
+            continue
         anterior = hist.get((i, mes_anterior(m)))
         encerrada = (i, meses(m, 2)[1]) not in acc and d15[m] < data_base
         if dc and mes_da_linha({"data": dc}) == m and ultimo < dfim[m].day and dfim[m] < data_base and encerrada:
@@ -1058,7 +1066,7 @@ def montar(pasta, data_base, tipo_if="banco"):
     res, pagos = projetar(ops, parcelas, libs, cenario, db, date(s0 + 2, 6, 30), feriados, hist)
     res = {**{k: v for k, v in hist.items() if v[1] > 0}, **res}  # realizado calculado + projeção
     apl_cod = defaultdict(lambda: defaultdict(float))
-    for (i, m), (cod, s) in res.items():
+    for (i, m, *_), (cod, s) in res.items():  # chave (id, mes) ou (id, mes, codigo) no código informado
         if cod:
             apl_cod[cod][m] += s
     mes_base = db.strftime("%Y-%m")
@@ -1079,7 +1087,7 @@ def montar(pasta, data_base, tipo_if="banco"):
         n = sum(1 for c in classif if motivo in c[4])
         if n:
             avisos.append(f"{n} operações {txt}: ver classificacao.csv")
-    com_saldo = {m for _, m in hist}
+    com_saldo = {k[1] for k in hist}
     sem_real = [m for m in meses_h if m < mes_base and m not in com_saldo]
     if sem_real:
         avisos.append(f"sem saldos_diarios para {', '.join(sem_real)}: esses meses entram com zero")
@@ -1175,7 +1183,7 @@ def cmd_rodar(pasta, data_base, tipo_if="banco", rodada=None):
     dados["rodada"], dados["avisos"], dados["python"] = rodada, avisos, resultado
     dados["python_oficial"] = oficial = calcular(dados, dados["params"], dados["apl_oficial"])
     gravar(destino / "saldo_operacoes.csv", ["id", "mes", "fonte", "codigo", "saldo_medio"],
-           [[i, m, CODIGOS[c]["fonte"] if c else "", c, round(s, 2)] for (i, m), (c, s) in sorted(res.items())])
+           [[i, m, CODIGOS[c]["fonte"] if c else "", c, round(s, 2)] for (i, m, *_), (c, s) in sorted(res.items())])
     gravar(destino / "classificacao.csv", ["id", "fonte", "codigo", "tipo", "motivo", "titulo"],
            [[i, fo, c, {"i": "informado", "c": "calculado"}.get(t, ""), mo, CODIGOS[c]["titulo"] if c else ""]
             for i, fo, c, t, mo in classif])
@@ -1231,6 +1239,8 @@ def carregar_rodada(caminho, mes=None):
     caminho = Path(caminho)
     if caminho.is_dir():
         caminho = caminho / "saldo_operacoes.csv"
+    # shortcut: operação de código informado com duas fontes no mês tem duas linhas e aqui fica a última; somar por
+    # código se a comparação precisar desse caso
     return {(r["id"].strip(), r["mes"].strip()): (r["fonte"].strip().upper(), r["codigo"].strip(), num(r["saldo_medio"]))
             for r in ler(caminho) if not mes or r["mes"].strip() == mes}
 
@@ -1694,6 +1704,18 @@ def autoteste():
     mm, _ = realizado_diario([dict(dia(date(2026, 9, k), "pronaf"), data_contratacao="2026-09-02") for k in (2, 3, 4)],
                              date(2026, 11, 2))
     check("contratada e encerrada no mesmo mês: o Sisex não conta o saldo (ADR 0006)", ("A", "2026-09") not in mm)
+    antiga = lambda d, prog: dict(dia(d, prog), data_contratacao="2024-03-01")  # código informado (antes de 2025/26)
+    set_ = [date(2026, 9, k) for k in range(1, 31) if date(2026, 9, k).weekday() < 5]
+    inf, _ = realizado_diario([antiga(d, "demais" if d.day <= 10 else "pronamp") for d in set_], date(2026, 11, 2))
+    du_set = dias_uteis("2026-09", set())
+    n_ate10 = sum(1 for d in set_ if d.day <= 10)
+    check("código informado: saldo de cada dia no código da fonte do dia (ADR 0006)",
+          perto(inf[("A", "2026-09")][1] + inf.get(("A", "2026-09", "3.1.30.45-8"), ["", 0])[1], 100.0)
+          and perto(sum(v[1] for k, v in inf.items() if v[0] == "3.1.30.45-8"), 100.0 * n_ate10 / du_set))
+    inf, _ = realizado_diario([antiga(date(2026, 8, 14), "pronamp")] + [antiga(date(2026, 9, k), "demais") for k in (1, 2, 3)],
+                              date(2026, 11, 2))
+    check("código informado encerrado antes do dia 15: fonte do dia, só os dias com saldo (não a do mês anterior)",
+          inf[("A", "2026-09")] == ["3.1.30.45-8", 300.0 / du_set])
     linhas = [dict(dia(date(2026, 11, k), "pronaf", 50.0), id="B") for k in (2, 3, 4)]
     hist, _ = realizado_diario(linhas, date(2026, 11, 5))
     res, _ = projetar({"B": {"codigo": "3.1.30.45-8", "saldo": 50.0, "taxa_aa": 0.0}}, [], [], [], date(2026, 11, 5),
