@@ -64,7 +64,7 @@ Data da foto da carteira. Antes dela é realizado, a partir dela é projeção.
 Valor de cada código nos meses antes da data-base, calculado pelo programa a partir da base de operações.
 
 **Valor oficial**:
-Valor de cada código informado ou calculado no Sisex. Fica ao lado do realizado, com a diferença, para validar um contra o outro.
+Valor de cada código informado ou calculado no Sisex. No relatório operacional fica ao lado do realizado, com a diferença, para validar um contra o outro; no relatório dos diretores é o valor dos meses passados.
 _Avoid_: realizado (o realizado é o calculado)
 
 **Projeção**:

@@ -509,7 +509,7 @@ BLOCOS = [
 ]
 # o que o relatório dos diretores leva da rodada (além da série oficial e dos parâmetros)
 CHAVES_DIRETORES = ["versao", "data_base", "mes_base", "meses", "safras", "du", "bases", "pagos", "dir", "grupos",
-                    "dir_modalidades", "limites", "balde", "resumo", "rodada", "sem_oficial"]
+                    "dir_modalidades", "limites", "balde", "resumo", "rodada", "sem_oficial", "oficial"]
 
 
 # ---------------------------------------------------------------- leitura e utilidades
@@ -763,8 +763,7 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
     Devolve (hist, avisos): hist = {(id, mes): [codigo, saldo_medio]} de julho do ano-safra até o mês da data-base,
     neste só com os dias antes dela. Saldo médio = soma dos saldos dos dias úteis / dias úteis do mês, com zero no
     dia útil sem linha (Doc 6, Anexo I, 4.6-b). Código do mês = regra aplicada à linha do último dia útil até o dia
-    15, pois a situação não muda em dia não útil (Doc 6, Anexo I, 12.2-b); operação que só aparece depois do dia 15
-    usa a 1ª linha do mês.
+    15, pois a situação não muda em dia não útil (Doc 6, Anexo I, 12.2-b). Linha em dia não útil é ignorada.
     """
     ini = date(safra_de(data_base.strftime("%Y-%m")), 7, 1)
     cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota da linha do código, código]
@@ -780,7 +779,9 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
         k = (r["id"].strip(), d.strftime("%Y-%m"))
         a = acc.setdefault(k, [0.0, -99, ""])
         a[0] += num(r["saldo"])
-        nota = d.day if d.day <= 15 else -d.day  # vale o dia mais perto do 15 por baixo; sem ele, o 1º do mês
+        # vale o dia mais perto do 15 por baixo. shortcut: operação que só aparece depois do dia 15 usa a 1ª linha do
+        # mês (premissa gerencial, o 12.2-b não trata esse caso); trocar quando confirmar como o Sisex faz
+        nota = d.day if d.day <= 15 else -d.day
         if nota > a[1]:
             c = tuple((r.get(x) or "").strip() for x in chave)
             if c not in cache:  # a classificação quase não muda de um dia para o outro
@@ -1048,13 +1049,15 @@ def montar(pasta, data_base, tipo_if="banco"):
     du = {m: dias_uteis(m, feriados) for m in meses_h}
     # série oficial: oficial nos meses passados, projeção nos futuros (o que os diretores veem)
     apl_of = {cod: dict(serie) for cod, serie in apl_cod.items()}
+    sem_of = [m for m in meses_h if m < mes_base and m not in oficial]
     if oficial:
         for cod in {c for v in oficial.values() for c in v if c in CODIGOS} | set(apl_cod):
-            pos = {m: v[cod] for m, v in oficial.items() if cod in v}
+            pos = {m: v.get(cod, 0.0) for m, v in oficial.items()}  # posição que veio sem o código: zero
             apl_of.setdefault(cod, {}).update(serie_do_oficial(pos, s0, mes_base, du, apl_cod.get(cod, {})))
-        sem_of = [m for m in meses_h if m < mes_base and m not in oficial]
         if sem_of:
             avisos.append(f"oficial sem a posição {', '.join(sem_of)}: nesses meses o relatório dos diretores usa o calculado")
+    if any(0 < v < 1000 for porm in params.get("liberacao", {}).values() for v in porm.values()):
+        avisos.append("parametros.json: liberação menor que R$ 1.000; desde a v0.4.0 o valor é em reais, não em milhões")
     for motivo, txt in (("sem código", "sem código no Documento 6 (não contam)"), ("empatada", "com regra empatada"),
                         ("regra daria", "com código informado diferente da regra")):
         n = sum(1 for c in classif if motivo in c[4])
@@ -1071,8 +1074,9 @@ def montar(pasta, data_base, tipo_if="banco"):
              "meses": meses_h, "safras": [s0, s0 + 1], "du": du, "oficial": oficial, "apl_oficial": por_categoria(apl_of),
              "bases": {str(s): bases(s, vsr, lca, tipo_if, avisos) for s in (s0, s0 + 1)},
              "apl": por_categoria(apl_cod), "pagos": dict(pg), "dir": dirs, "params": params,
-             "grupos": list(GRUPOS), "dir_modalidades": DIR_MODALIDADES, "limites": LIMITES, "balde": BALDE, "linhas": LINHAS, "resumo": RESUMO, "blocos": BLOCOS,
-             "chaves_diretores": CHAVES_DIRETORES, "sem_oficial": [m for m in meses_h if m < mes_base and m not in oficial]}
+             "grupos": list(GRUPOS), "dir_modalidades": DIR_MODALIDADES, "limites": LIMITES, "balde": BALDE, "linhas": LINHAS, "blocos": BLOCOS,
+             "resumo": [[r, an, e, f, *(next(c for k, c, _ in LINHAS[an] if k == x) for x in (e, f))] for r, an, e, f in RESUMO],
+             "chaves_diretores": CHAVES_DIRETORES, "sem_oficial": sem_of}
     return dados, res, avisos, classif, apl_cod
 
 
@@ -1084,7 +1088,9 @@ def serie_do_oficial(pos, s, mes_base, du, calc):
     """Saldo médio de cada mês passado do ano-safra s tirado das posições oficiais acumuladas de um código.
 
     A posição é a média acumulada de julho até o mês pelos dias úteis (Doc 6, Anexo I, 4.6-c/d), então o mês sai de
-    posição x dias úteis acumulados menos o que os meses anteriores já somam. Mês sem posição oficial usa o calculado."""
+    posição x dias úteis acumulados menos o que os meses anteriores já somam.
+    shortcut: mês sem posição oficial usa o calculado (premissa gerencial, avisada no relatório); some quando o
+    oficial vier completo."""
     out, soma, peso = {}, 0.0, 0
     for m in meses(f"{s}-07", 12):
         if m >= mes_base:
@@ -1385,13 +1391,15 @@ DIRETORES_MODELO = r"""<!doctype html>
 <main id="corpo"></main>
 <script type="application/json" id="dados">__DADOS__</script>
 <script>__MOTOR__
-const R=calcular(D.params||{});let h=`<p class="nota leg"><span class="pa">meses passados: valor oficial (Sisex)</span><span class="at">mês da data-base</span><span class="fu">projeção, partindo do oficial</span></p>`;
+const R=calcular(D.params||{});
+const saldo=(s,m,an,e,f,ce,cf)=>D.oficial[m]&&m<D.mes_base?(D.oficial[m][ce]||0)-(D.oficial[m][cf]||0):R[s][m][an][e]-R[s][m][an][f];  // passado: o próprio código oficial
+let h=`<p class="nota leg"><span class="pa">meses passados: valor oficial (Sisex)</span><span class="at">mês da data-base</span><span class="fu">projeção, partindo do oficial</span></p>`;
 if(D.sem_oficial.length)h+=`<div class="avisos">Sem valor oficial em ${D.sem_oficial.map(rot).join(", ")}: nesses meses foi usado o valor calculado pelo programa.</div>`;
 for(const s of D.safras){const jun=(s+1)+"-06";
   h+=`<h2>Ano-safra ${s}/${s+1}</h2><h3>Fechamento de junho/${String(s+1).slice(2)}: excesso (+) / deficiência (−), R$ milhões</h3><div class="cards">`;
-  for(const [r,an,e,f] of D.resumo){const v=R[s][jun][an][e]-R[s][jun][an][f];h+=`<div class="card"><div class="r">${r}</div><div class="v ${sinal(v,5e4)}">${mi(v)}</div></div>`}
+  for(const [r,an,e,f,ce,cf] of D.resumo){const v=saldo(s,jun,an,e,f,ce,cf);h+=`<div class="card"><div class="r">${r}</div><div class="v ${sinal(v,5e4)}">${mi(v)}</div></div>`}
   h+=`</div><h3>Excesso (+) / deficiência (−) até o mês, R$ milhões</h3><div class="tab"><table>${cabecalho(s)}`;
-  for(const [r,an,e,f] of D.resumo)h+=`<tr><td>${r}</td>`+mesesSafra(s).map(m=>{const v=R[s][m][an][e]-R[s][m][an][f];return `<td class="${periodo(m)} ${sinal(v,5e4)}">${mi(v)}</td>`}).join("")+"</tr>";
+  for(const [r,an,e,f,ce,cf] of D.resumo)h+=`<tr><td>${r}</td>`+mesesSafra(s).map(m=>{const v=saldo(s,m,an,e,f,ce,cf);return `<td class="${periodo(m)} ${sinal(v,5e4)}">${mi(v)}</td>`}).join("")+"</tr>";
   h+="</table></div>"}
 document.getElementById("corpo").innerHTML=h+`<p class="nota">Posição de cada mês = média acumulada desde julho, como no Sisex (MCR, Documento 6). Parâmetros da gerência: ${D.origem}.</p>`;
 document.getElementById("meta").textContent=`Data-base ${dataBR(D.data_base)} · rodada ${D.rodada} · v${D.versao}`;
@@ -1416,7 +1424,7 @@ OPERACIONAL_MODELO = r"""<!doctype html>
 <script type="application/json" id="dados">__DADOS__</script>
 <script type="application/json" id="modelo-diretores">__MODELO_DIRETORES__</script>
 <script>__MOTOR__
-const NOME_GR = {RO_PRONAF:"Obrigatórios Pronaf",RO_PRONAMP:"Obrigatórios Pronamp",RO_DEMAIS:"Obrigatórios Geral",POUP:"Poupança",LCA:"LCA"};
+const NOME_GR = {RO_PRONAF:"Obrigatórios Pronaf",RO_PRONAMP:"Obrigatórios Pronamp",RO_DEMAIS:"Obrigatórios Demais",POUP:"Poupança",LCA:"LCA"};
 const NOME_DIR = {geral:"DIR-Geral",pronaf:"DIR-Pronaf",pronamp:"DIR-Pronamp",poup:"DIR-Poup",lca_cr:"DIR-LCA-CR",lca_livre:"DIR-LCA-Livre"};
 const LIN = {};for(const an in D.linhas){LIN[an]={};for(const [k,cod,desc] of D.linhas[an])LIN[an][k]=[cod,desc]}
 let P = JSON.parse(JSON.stringify(D.params || {}));
@@ -1656,8 +1664,13 @@ def autoteste():
           hist[("A", "2026-08")][0] == "3.1.13.49-9" and realizado_diario(linhas[::-1], date(2026, 11, 2))[0] == hist)
     check("operação que muda de programa depois do dia 15 fica no código antigo naquele mês",
           hist[("A", "2026-08")][0] == "3.1.13.49-9" and perto(hist[("A", "2026-08")][1], 100.0))
-    check("dia útil sem linha conta zero (Doc 6, Anexo I, 4.6-b)",
-          perto(hist[("A", "2026-09")][1], 300.0 / dias_uteis("2026-09", set())))
+    check("dia útil sem linha conta zero (Doc 6, Anexo I, 4.6-b); linha em dia não útil é ignorada",
+          perto(hist[("A", "2026-09")][1], 300.0 / dias_uteis("2026-09", set()))
+          and realizado_diario(linhas + [dia(date(2026, 9, 5), "pronaf")], date(2026, 11, 2))[0] == hist)
+    tarde, _ = realizado_diario([dia(date(2026, 9, k), "pronaf" if k < 25 else "pronamp") for k in (21, 22, 28)],
+                                date(2026, 11, 2))
+    check("premissa: operação que só aparece depois do dia 15 usa a 1ª linha do mês",
+          tarde[("A", "2026-09")][0] == "3.1.13.49-9")
     linhas = [dict(dia(date(2026, 11, k), "pronaf", 50.0), id="B") for k in (2, 3, 4)]
     hist, _ = realizado_diario(linhas, date(2026, 11, 5))
     res, _ = projetar({"B": {"codigo": "3.1.30.45-8", "saldo": 50.0, "taxa_aa": 0.0}}, [], [], [], date(2026, 11, 5),
@@ -1726,7 +1739,7 @@ def autoteste():
     niv = com_parametros({}, pg, {"pct_geral": 50, "pct_grupo": {"POUP": 90}, "pct": {"POUP": {"2026-09": 0}}}, M, "2026-07")
     check("% de reembolso: geral preenche todos, grupo preenche o grupo, célula muda só ela",
           perto(niv["RO|pronaf"]["2026-09"], 5) and perto(niv["POUP|credito_rural"]["2026-10"], 1 + 10))
-    check("% de reembolso padrão = 80%; o parametros.json salvo vira o padrão da próxima rodada",
+    check("% de reembolso padrão = 80%; o geral salvo no parametros.json vale como padrão",
           perto(com_parametros({}, pg, {}, M, "2026-07")["RO|pronaf"]["2026-09"], 2)
           and perto(com_parametros({}, pg, {"pct_geral": 70}, M, "2026-07")["RO|pronaf"]["2026-09"], 3))
     check("liberação da gerência: meio mês, prazo cheio, meio mês na volta; reembolso de 60% deixa 40% no saldo",

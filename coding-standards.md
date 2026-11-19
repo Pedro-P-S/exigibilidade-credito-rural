@@ -17,7 +17,7 @@
 
 - Um arquivo só (`exigibilidade.py`), só biblioteca padrão; `openpyxl` só para `.xlsx` (ADR 0002).
 - Nomes em português, os mesmos termos do `GLOSSARY.md`.
-- Mudou `com_parametros`, `dir_final`, `acum`, `aplicar` ou `sisex`: mude a cópia em JavaScript no HTML também (ADR 0003).
+- Mudou `pct_de`, `com_parametros`, `dir_final`, `acum`, `aplicar` ou `sisex`: mude a cópia em JavaScript no HTML também (ADR 0003).
 - Atalho com limite conhecido leva o comentário `shortcut: <o limite>, <quando melhorar>`.
 
 ## Verificação
