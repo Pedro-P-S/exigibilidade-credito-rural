@@ -120,7 +120,7 @@ Entrada de dinheiro numa operação. Liberação da base: futura e já prevista 
 ## Gerência
 
 **Premissa gerencial**:
-Suposição da gerência que não é norma do MCR: liberação da gerência, % de reembolso, prazo de retorno, juros da projeção.
+Suposição da gerência que não é norma do MCR: liberação da gerência, % de reembolso, meses até a liberação nova ser paga, juros da projeção.
 _Avoid_: regra
 
 **Grupo da gerência**:

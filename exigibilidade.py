@@ -848,11 +848,19 @@ def bases(safra, vsr, lca, tipo_if, avisos):
 
 
 # ---------------------------------------------------------------- parâmetros da gerência e fórmulas do Sisex
-# Estas três funções têm cópia idêntica em JavaScript no HTML (simulação); o HTML confere que dão o mesmo resultado.
+# Estas funções têm cópia idêntica em JavaScript no HTML (simulação); o HTML confere que dão o mesmo resultado.
+
+def pct_de(params, g, m):
+    """% de reembolso do grupo no mês (premissa gerencial): o da célula, senão o do grupo, senão o geral, senão 80."""
+    for v in (params.get("pct", {}).get(g, {}).get(m), params.get("pct_grupo", {}).get(g), params.get("pct_geral")):
+        if v is not None:
+            return v
+    return 80
+
 
 def com_parametros(apl, pagos, params, meses_h, mes_base):
     """Soma às aplicações as liberações da gerência (voltam em parcela única após o prazo) e o que não for
-    reembolsado pelo % de reembolso (fica no saldo até o fim do horizonte). Valores da gerência em R$ milhões."""
+    reembolsado pelo % de reembolso (fica no saldo até o fim do horizonte). Valores da gerência em reais."""
     out = {k: dict(v) for k, v in apl.items()}
     for g, (fo, ca) in GRUPOS.items():
         prazo = max(1, int(params.get("prazo", {}).get(g, 12)))
@@ -860,8 +868,8 @@ def com_parametros(apl, pagos, params, meses_h, mes_base):
         for j, mj in enumerate(meses_h):
             if mj < mes_base:
                 continue
-            lib = params.get("liberacao", {}).get(g, {}).get(mj, 0) * 1e6
-            pct = params.get("pct", {}).get(g, {}).get(mj, 100)
+            lib = params.get("liberacao", {}).get(g, {}).get(mj, 0)
+            pct = pct_de(params, g, mj)
             u = (1 - pct / 100) * pagos.get(g, {}).get(mj, 0)
             if not lib and not u:
                 continue
@@ -875,7 +883,7 @@ def dir_final(dirs, params):
     out = {mod: {m: list(v) for m, v in dirs.get(mod, {}).items()} for mod in DIR_MODALIDADES}
     for mod, porm in params.get("dir", {}).items():
         for m, (c, a) in porm.items():
-            out.setdefault(mod, {})[m] = [c * 1e6, a * 1e6]
+            out.setdefault(mod, {})[m] = [c, a]
     return out
 
 
@@ -1247,7 +1255,7 @@ input{width:72px;padding:3px 4px;border:1px solid var(--ln);border-radius:4px;ba
 <section id="geral" class="ativo"></section>
 <section id="detalhe"></section>
 <section id="param">
-<p class="nota">Valores em R$ milhões. Liberação e % de reembolso por grupo e mês; a liberação volta em parcela única depois do prazo. DIR: saldo médio do mês (captação e aplicação). Tudo recalcula na hora.</p>
+<p class="nota">Campos em reais, valor exato (as tabelas dos relatórios mostram R$ milhões). Liberação e % de reembolso por grupo e mês; a liberação nova é paga em parcela única depois do número de meses informado. DIR: saldo médio do mês (captação e aplicação). Tudo recalcula na hora.</p>
 <div class="acoes"><button id="salvar">Salvar parâmetros (parametros.json)</button><label>Carregar parâmetros <input type="file" id="carregar" accept=".json" hidden></label><button id="restaurar">Voltar aos parâmetros da rodada</button></div>
 <div id="campos"></div>
 </section>
@@ -1261,18 +1269,19 @@ const NOME_GR = {RO_PRONAF:"RO - Pronaf",RO_PRONAMP:"RO - Pronamp",RO_DEMAIS:"RO
 const NOME_DIR = {geral:"DIR-Geral",pronaf:"DIR-Pronaf",pronamp:"DIR-Pronamp",poup:"DIR-Poup",lca_cr:"DIR-LCA-CR",lca_livre:"DIR-LCA-Livre"};
 let P = JSON.parse(JSON.stringify(D.params || {}));
 
-// ---- cópia exata de com_parametros, dir_final, acum e sisex do Python
+// ---- cópia exata de pct_de, com_parametros, dir_final, acum e sisex do Python
 function mesesSafra(s){const r=[];let a=s,m=7;for(let i=0;i<12;i++){r.push(a+"-"+String(m).padStart(2,"0"));if(m===12){a++;m=1}else m++}return r}
 function g(o,...ks){for(const k of ks){if(o==null)return undefined;o=o[k]}return o}
+function pctDe(P,gr,m){return g(P,"pct",gr,m)??g(P,"pct_grupo",gr)??P.pct_geral??80}
 function comParametros(apl,pagos,P,M,mesBase){
   const out={};for(const k in apl)out[k]=Object.assign({},apl[k]);
   for(const gr in GR){const [fo,ca]=GR[gr];const prazo=Math.max(1,parseInt(g(P,"prazo",gr)??12));const key=fo+"|"+ca;out[key]=out[key]||{};const alvo=out[key];
-    M.forEach((mj,j)=>{if(mj<mesBase)return;const lib=(g(P,"liberacao",gr,mj)||0)*1e6;const pct=g(P,"pct",gr,mj)??100;const u=(1-pct/100)*(g(pagos,gr,mj)||0);
+    M.forEach((mj,j)=>{if(mj<mesBase)return;const lib=g(P,"liberacao",gr,mj)||0;const pct=pctDe(P,gr,mj);const u=(1-pct/100)*(g(pagos,gr,mj)||0);
       if(!lib&&!u)return;
       for(let k=j;k<M.length;k++){const dl=k<=j+prazo?lib*((k===j||k===j+prazo)?0.5:1):0;alvo[M[k]]=(alvo[M[k]]||0)+dl+u*(k===j?0.5:1)}})}
   return out}
 function dirFinal(dirs,P){const out={};for(const mod of D.dir_modalidades){out[mod]={};for(const m in (dirs[mod]||{}))out[mod][m]=dirs[mod][m].slice()}
-  for(const mod in (P.dir||{}))for(const m in P.dir[mod]){const [c,a]=P.dir[mod][m];(out[mod]=out[mod]||{})[m]=[c*1e6,a*1e6]}return out}
+  for(const mod in (P.dir||{}))for(const m in P.dir[mod]){const [c,a]=P.dir[mod][m];(out[mod]=out[mod]||{})[m]=[c,a]}return out}
 function acum(serie,s,m){let t=0,p=0;for(const k of mesesSafra(s)){if(k>m)break;const w=D.du[k]||0;t+=(serie[k]||0)*w;p+=w}return p?t/p:0}
 function aplicar(an,d,c){for(const k of Object.values(D.balde[an]))d[k]=0;for(const v of Object.values(D.limites))if(v[0]===an)d[v[1]]=0;
   for(const cat in D.balde[an])d[D.balde[an][cat]]+=c(an+"|"+cat);
@@ -1324,18 +1333,24 @@ function render(){const R=calcular(P);let h="",d="";
       d+="</table></div>"}}
   document.getElementById("geral").innerHTML=h+'<p class="nota">R = realizado, P = projetado. A fonte de cada operação no mês é a do dia 15.</p>';
   document.getElementById("detalhe").innerHTML=d}
-function campo(caminho,valor,mult){return `<input data-c="${caminho}" value="${valor===undefined?"":String(valor).replace(".",",")}">`}
+const reais=v=>v===undefined?"":(+v).toLocaleString("pt-BR",{maximumFractionDigits:2});
+function campo(caminho,valor){return `<input data-c="${caminho}" value="${reais(valor)}">`}
+function atualizarPct(){document.querySelectorAll('#campos input[data-c^="pct"]').forEach(e=>{const [t,x,m]=e.dataset.c.split("|");
+  if(t==="pct")e.value=reais(pctDe(P,x,m));else if(t==="pct_grupo")e.value=reais(g(P,"pct_grupo",x)??P.pct_geral??80)})}
 function montarCampos(){const M=D.meses.filter(m=>m>=D.mes_base);const cab="<tr><th></th>"+M.map(m=>`<th>${rot(m)}</th>`).join("")+"</tr>";
-  let h="<h2>Prazo de retorno das liberações novas (meses)</h2><div class='tab'><table><tr>"+D.grupos.map(x=>`<th>${NOME_GR[x]}</th>`).join("")+"</tr><tr>"+D.grupos.map(x=>`<td>${campo("prazo|"+x,g(P,"prazo",x)??12)}</td>`).join("")+"</tr></table></div>";
-  h+="<h2>Liberação da gerência (R$ mi no mês)</h2><div class='tab'><table>"+cab+D.grupos.map(x=>`<tr><td>${NOME_GR[x]}</td>`+M.map(m=>`<td>${campo("liberacao|"+x+"|"+m,g(P,"liberacao",x,m))}</td>`).join("")+"</tr>").join("")+"</table></div>";
-  h+="<h2>% de reembolso das parcelas (100 = paga tudo)</h2><div class='tab'><table>"+cab+D.grupos.map(x=>`<tr><td>${NOME_GR[x]}</td>`+M.map(m=>`<td>${campo("pct|"+x+"|"+m,g(P,"pct",x,m)??100)}</td>`).join("")+"</tr>").join("")+"</table></div>";
-  h+="<h2>DIR (R$ mi, saldo médio do mês): captação / aplicação</h2><div class='tab'><table>"+cab;
+  let h="<h2>Liberação nova é paga depois de quantos meses</h2><div class='tab'><table><tr>"+D.grupos.map(x=>`<th>${NOME_GR[x]}</th>`).join("")+"</tr><tr>"+D.grupos.map(x=>`<td>${campo("prazo|"+x,g(P,"prazo",x)??12)}</td>`).join("")+"</tr></table></div>";
+  h+="<h2>Liberação da gerência (R$ no mês, valor exato)</h2><div class='tab'><table>"+cab+D.grupos.map(x=>`<tr><td>${NOME_GR[x]}</td>`+M.map(m=>`<td>${campo("liberacao|"+x+"|"+m,g(P,"liberacao",x,m))}</td>`).join("")+"</tr>").join("")+"</table></div>";
+  h+="<h2>% de reembolso das parcelas (100 = paga tudo)</h2><p class='nota'>O geral preenche todos os grupos e meses; o do grupo preenche os meses do grupo; cada mês pode ser mudado sozinho.</p><div class='tab'><table><tr><th>Geral</th><td>"+campo("pct_geral",P.pct_geral??80)+"</td></tr></table><table>"
+    +"<tr><th></th><th>Grupo</th>"+M.map(m=>`<th>${rot(m)}</th>`).join("")+"</tr>"+D.grupos.map(x=>`<tr><td>${NOME_GR[x]}</td><td>${campo("pct_grupo|"+x,g(P,"pct_grupo",x)??P.pct_geral??80)}</td>`+M.map(m=>`<td>${campo("pct|"+x+"|"+m,pctDe(P,x,m))}</td>`).join("")+"</tr>").join("")+"</table></div>";
+  h+="<h2>DIR (R$, saldo médio do mês, valor exato): captação / aplicação</h2><div class='tab'><table>"+cab;
   for(const mod of D.dir_modalidades)for(const [i,nm] of [[0,"captação"],[1,"aplicação"]])
-    h+=`<tr><td>${NOME_DIR[mod]} ${nm}</td>`+M.map(m=>{const v=g(P,"dir",mod,m)?P.dir[mod][m][i]:(g(D.dir,mod,m)?D.dir[mod][m][i]/1e6:0);return `<td>${campo("dir|"+mod+"|"+m+"|"+i,Math.round(v*100)/100)}</td>`}).join("")+"</tr>";
+    h+=`<tr><td>${NOME_DIR[mod]} ${nm}</td>`+M.map(m=>{const v=g(P,"dir",mod,m)?P.dir[mod][m][i]:(g(D.dir,mod,m)?D.dir[mod][m][i]:0);return `<td>${campo("dir|"+mod+"|"+m+"|"+i,v)}</td>`}).join("")+"</tr>";
   document.getElementById("campos").innerHTML=h+"</table></div>"}
 document.getElementById("campos").addEventListener("input",e=>{const c=e.target.dataset.c;if(!c)return;const v=parseFloat(e.target.value.replace(/\./g,"").replace(",","."));const p=c.split("|");
   if(p[0]==="prazo"){(P.prazo=P.prazo||{})[p[1]]=isNaN(v)?12:v}
-  else if(p[0]==="dir"){const [,mod,m,i]=p;P.dir=P.dir||{};P.dir[mod]=P.dir[mod]||{};const atual=P.dir[mod][m]||[g(D.dir,mod,m)?D.dir[mod][m][0]/1e6:0,g(D.dir,mod,m)?D.dir[mod][m][1]/1e6:0];atual[+i]=isNaN(v)?0:v;P.dir[mod][m]=atual}
+  else if(p[0]==="dir"){const [,mod,m,i]=p;P.dir=P.dir||{};P.dir[mod]=P.dir[mod]||{};const atual=P.dir[mod][m]||(g(D.dir,mod,m)||[0,0]).slice();atual[+i]=isNaN(v)?0:v;P.dir[mod][m]=atual}
+  else if(p[0]==="pct_geral"){if(isNaN(v))delete P.pct_geral;else P.pct_geral=v;delete P.pct_grupo;delete P.pct;atualizarPct()}
+  else if(p[0]==="pct_grupo"){P.pct_grupo=P.pct_grupo||{};if(isNaN(v))delete P.pct_grupo[p[1]];else P.pct_grupo[p[1]]=v;if(P.pct)delete P.pct[p[1]];atualizarPct()}
   else{const [t,x,m]=p;P[t]=P[t]||{};P[t][x]=P[t][x]||{};if(isNaN(v))delete P[t][x][m];else P[t][x][m]=v}
   render()});
 document.getElementById("salvar").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(P,null,1)],{type:"application/json"}));a.download="parametros.json";a.click()};
@@ -1411,7 +1426,7 @@ def cmd_exemplo(data_base="2026-11-02"):
     gravar(ex / "lca.txt", ["data", "mes", "saldo"], lca)
     gravar(ex / "dir.csv", ["mes", "modalidade", "captacao", "aplicacao"],
            [[m, "pronaf", 0.0, 5e6] for m in meses("2026-07", 24)] + [[m, "geral", 3e6, 0.0] for m in meses("2026-07", 24)])
-    (ex / "parametros.json").write_text(json.dumps({"prazo": {"RO_PRONAF": 10}, "liberacao": {"RO_PRONAF": {"2027-07": 20}},
+    (ex / "parametros.json").write_text(json.dumps({"prazo": {"RO_PRONAF": 10}, "liberacao": {"RO_PRONAF": {"2027-07": 20e6}},
                                                     "pct": {"RO_PRONAMP": {"2027-03": 60}}}, indent=1), encoding="utf-8")
     print(f"Entradas inventadas em {ex}\n")
     return cmd_rodar(ex, data_base, rodada=f"exemplo_{datetime.now():%Y-%m-%d_%H%M%S}")
@@ -1551,8 +1566,15 @@ def autoteste():
     # parâmetros da gerência
     M = meses("2026-07", 6)
     out = com_parametros({}, {"RO_PRONAF": {"2026-08": 10.0}},
-                         {"prazo": {"RO_PRONAF": 2}, "liberacao": {"RO_PRONAF": {"2026-07": 1}},
+                         {"prazo": {"RO_PRONAF": 2}, "liberacao": {"RO_PRONAF": {"2026-07": 1e6}},
                           "pct": {"RO_PRONAF": {"2026-08": 60}}}, M, "2026-07")["RO|pronaf"]
+    pg = {"RO_PRONAF": {"2026-08": 10.0}, "POUP": {"2026-08": 10.0, "2026-09": 10.0}}
+    niv = com_parametros({}, pg, {"pct_geral": 50, "pct_grupo": {"POUP": 90}, "pct": {"POUP": {"2026-09": 0}}}, M, "2026-07")
+    check("% de reembolso: geral preenche todos, grupo preenche o grupo, célula muda só ela",
+          perto(niv["RO|pronaf"]["2026-09"], 5) and perto(niv["POUP|credito_rural"]["2026-10"], 1 + 10))
+    check("% de reembolso padrão = 80%; o parametros.json salvo vira o padrão da próxima rodada",
+          perto(com_parametros({}, pg, {}, M, "2026-07")["RO|pronaf"]["2026-09"], 2)
+          and perto(com_parametros({}, pg, {"pct_geral": 70}, M, "2026-07")["RO|pronaf"]["2026-09"], 3))
     check("liberação da gerência: meio mês, prazo cheio, meio mês na volta; reembolso de 60% deixa 40% no saldo",
           perto(out["2026-07"], 5e5) and perto(out["2026-08"], 1e6 + 2) and perto(out["2026-09"], 5e5 + 4)
           and perto(out["2026-10"], 4))
