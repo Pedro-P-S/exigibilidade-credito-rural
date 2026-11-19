@@ -780,7 +780,7 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
         a = acc.setdefault(k, [0.0, -99, ""])
         a[0] += num(r["saldo"])
         # vale o dia mais perto do 15 por baixo. shortcut: operação que só aparece depois do dia 15 usa a 1ª linha do
-        # mês (premissa gerencial, o 12.2-b não trata esse caso); trocar quando confirmar como o Sisex faz
+        # mês; o Doc 6, Anexo I, 12.2-b não define esse caso (a rodada avisa); trocar quando o Sisex mostrar como faz
         nota = d.day if d.day <= 15 else -d.day
         if nota > a[1]:
             c = tuple((r.get(x) or "").strip() for x in chave)
@@ -795,6 +795,10 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
         du[m] = du.get(m) or dias_uteis(m, feriados)
         hist[(i, m)] = [cod, soma / du[m]]
     avisos = [f"saldos_diarios: {fora} linhas em dia não útil ignoradas"] if fora else []
+    tarde = {i for (i, _), a in acc.items() if a[1] < 0}
+    if tarde:
+        avisos.append(f"saldos_diarios: {len(tarde)} operações só aparecem depois do dia 15 em algum mês; o MCR não define "
+                      "o código delas nesse mês (Doc 6, Anexo I, 12.2-b) e o programa usa o do 1º dia em que aparecem")
     if sem:
         avisos.append(f"saldos_diarios: {len(sem)} operações sem código no Documento 6 em algum mês (não contam)")
     return hist, avisos
@@ -1669,7 +1673,7 @@ def autoteste():
           and realizado_diario(linhas + [dia(date(2026, 9, 5), "pronaf")], date(2026, 11, 2))[0] == hist)
     tarde, _ = realizado_diario([dia(date(2026, 9, k), "pronaf" if k < 25 else "pronamp") for k in (21, 22, 28)],
                                 date(2026, 11, 2))
-    check("premissa: operação que só aparece depois do dia 15 usa a 1ª linha do mês",
+    check("operação que só aparece depois do dia 15 usa a 1ª linha do mês (caso que o MCR não define)",
           tarde[("A", "2026-09")][0] == "3.1.13.49-9")
     linhas = [dict(dia(date(2026, 11, k), "pronaf", 50.0), id="B") for k in (2, 3, 4)]
     hist, _ = realizado_diario(linhas, date(2026, 11, 5))
