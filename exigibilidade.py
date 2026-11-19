@@ -9,7 +9,6 @@ Comandos:
   python exigibilidade.py exemplo                        gera entradas inventadas em exemplo/ e roda tudo
   python exigibilidade.py rodar PASTA_ENTRADAS --data-base AAAA-MM-DD [--tipo-if banco|cooperativa] [--rodada NOME]
   python exigibilidade.py comparar RODADA_A RODADA_B [--mes AAAA-MM]   (pastas ou saldo_operacoes.csv)
-  python exigibilidade.py validar RODADA ARQUIVO_SISEX  (colunas posicao, codigo, valor)
   python exigibilidade.py estrutura ARQUIVO_OU_PASTA [...] [--mascarar "NOME1,NOME2"]
 
 Sem argumentos (F5 no Spyder) abre um menu. Saídas em saidas/ ao lado do script. Só biblioteca padrão
@@ -810,7 +809,10 @@ def carregar_entradas(pasta, data_base, feriados):
         c, a = dirs[mod].get(mes_da_linha(r), [0.0, 0.0])
         dirs[mod][mes_da_linha(r)] = [c + num(r.get("captacao")), a + num(r.get("aplicacao"))]
     params = json.loads((p / "parametros.json").read_text(encoding="utf-8")) if (p / "parametros.json").exists() else {}
-    return ops, parcelas, libs, cenario, hist, vsr, lca, dict(dirs), params, avisos, classif
+    oficial = defaultdict(lambda: defaultdict(float))  # posicao -> codigo -> valor oficial (Sisex) da posição
+    for r in ler(achar(p, "oficial")) if achar(p, "oficial") else []:
+        oficial[mes_da_linha({"mes": r.get("posicao") or r.get("mes")})][r["codigo"].strip()] += num(r["valor"])
+    return ops, parcelas, libs, cenario, hist, vsr, lca, dict(dirs), params, avisos, classif, {m: dict(v) for m, v in oficial.items()}
 
 
 # ---------------------------------------------------------------- bases de cálculo (MCR 6-2-2, 6-4-2, 6-7-4)
@@ -982,12 +984,23 @@ def calcular(dados, params):
             for s in dados["safras"]}
 
 
+def por_categoria(apl_cod):
+    """Saldo x fator (ponderador da seção 4) por fonte|categoria do cálculo."""
+    apl = defaultdict(dict)
+    for cod, porm in apl_cod.items():
+        r = CODIGOS[cod]
+        for m, v in porm.items():
+            k = f"{r['fonte']}|{r['cat']}"
+            apl[k][m] = apl[k].get(m, 0.0) + v * float(r["fator"] or 1)
+    return dict(apl)
+
+
 def montar(pasta, data_base, tipo_if="banco"):
     """Lê as entradas, projeta e devolve (dados, res_operacoes, avisos)."""
     db = dt(data_base) if isinstance(data_base, str) else data_base
     feriados_arq = achar(pasta, "feriados")
     feriados = {dt(r["data"]) for r in ler(feriados_arq)} if feriados_arq else set()
-    ops, parcelas, libs, cenario, hist, vsr, lca, dirs, params, avisos, classif = carregar_entradas(pasta, db, feriados)
+    ops, parcelas, libs, cenario, hist, vsr, lca, dirs, params, avisos, classif, oficial = carregar_entradas(pasta, db, feriados)
     s0 = safra_de(db.strftime("%Y-%m"))
     meses_h = meses(f"{s0}-07", 24)
     res, pagos = projetar(ops, parcelas, libs, cenario, db, date(s0 + 2, 6, 30), feriados, hist)
@@ -996,18 +1009,22 @@ def montar(pasta, data_base, tipo_if="banco"):
     for (i, m), (cod, s) in res.items():
         if cod:
             apl_cod[cod][m] += s
-    apl = defaultdict(dict)  # saldo x fator (ponderador da seção 4) por fonte|categoria do cálculo
-    for cod, porm in apl_cod.items():
-        r = CODIGOS[cod]
-        for m, v in porm.items():
-            k = f"{r['fonte']}|{r['cat']}"
-            apl[k][m] = apl[k].get(m, 0.0) + v * float(r["fator"] or 1)
+    mes_base = db.strftime("%Y-%m")
+    du = {m: dias_uteis(m, feriados) for m in meses_h}
+    # série oficial: oficial nos meses passados, projeção nos futuros (o que os diretores veem)
+    apl_of = {cod: dict(serie) for cod, serie in apl_cod.items()}
+    if oficial:
+        for cod in {c for v in oficial.values() for c in v if c in CODIGOS} | set(apl_cod):
+            pos = {m: v[cod] for m, v in oficial.items() if cod in v}
+            apl_of.setdefault(cod, {}).update(serie_do_oficial(pos, s0, mes_base, du, apl_cod.get(cod, {})))
+        sem_of = [m for m in meses_h if m < mes_base and m not in oficial]
+        if sem_of:
+            avisos.append(f"oficial sem a posição {', '.join(sem_of)}: nesses meses o relatório dos diretores usa o calculado")
     for motivo, txt in (("sem código", "sem código no Documento 6 (não contam)"), ("empatada", "com regra empatada"),
                         ("regra daria", "com código informado diferente da regra")):
         n = sum(1 for c in classif if motivo in c[4])
         if n:
             avisos.append(f"{n} operações {txt}: ver classificacao.csv")
-    mes_base = db.strftime("%Y-%m")
     com_saldo = {m for _, m in hist}
     sem_real = [m for m in meses_h if m < mes_base and m not in com_saldo]
     if sem_real:
@@ -1016,20 +1033,56 @@ def montar(pasta, data_base, tipo_if="banco"):
     for (g, m), v in pagos.items():
         pg[g][m] = v
     dados = {"versao": VERSAO, "data_base": db.isoformat(), "mes_base": mes_base, "tipo_if": tipo_if,
-             "meses": meses_h, "safras": [s0, s0 + 1], "du": {m: dias_uteis(m, feriados) for m in meses_h},
+             "meses": meses_h, "safras": [s0, s0 + 1], "du": du, "oficial": oficial, "apl_oficial": por_categoria(apl_of),
              "bases": {str(s): bases(s, vsr, lca, tipo_if, avisos) for s in (s0, s0 + 1)},
-             "apl": dict(apl), "pagos": dict(pg), "dir": dirs, "params": params,
+             "apl": por_categoria(apl_cod), "pagos": dict(pg), "dir": dirs, "params": params,
              "grupos": list(GRUPOS), "dir_modalidades": DIR_MODALIDADES, "limites": LIMITES, "balde": BALDE, "linhas": LINHAS, "resumo": RESUMO}
     return dados, res, avisos, classif, apl_cod
 
 
-CAB_CODIGOS = ["ano_safra", "posicao", "R_P", "anexo", "codigo", "tipo", "titulo", "saldo_medio_mes", "valor_doc6",
-               "valor_sisex", "diferenca"]
+CAB_CODIGOS = ["ano_safra", "posicao", "R_P", "anexo", "codigo", "tipo", "titulo", "saldo_medio_mes", "calculado",
+               "oficial", "diferenca"]
+
+
+def serie_do_oficial(pos, s, mes_base, du, calc):
+    """Saldo médio de cada mês passado do ano-safra s tirado das posições oficiais acumuladas de um código.
+
+    A posição é a média acumulada de julho até o mês pelos dias úteis (Doc 6, Anexo I, 4.6-c/d), então o mês sai de
+    posição x dias úteis acumulados menos o que os meses anteriores já somam. Mês sem posição oficial usa o calculado."""
+    out, soma, peso = {}, 0.0, 0
+    for m in meses(f"{s}-07", 12):
+        if m >= mes_base:
+            break
+        peso += du[m]
+        out[m] = (pos[m] * peso - soma) / du[m] if m in pos else calc.get(m, 0.0)
+        soma += out[m] * du[m]
+    return out
+
+
+def com_oficial(linhas, oficial, dados):
+    """Preenche oficial e diferença nas linhas do codigos.csv das posições que vieram no arquivo oficial.
+    Código que só existe num dos lados aparece com o outro em zero; posição sem oficial fica em branco."""
+    vistos = set()
+    for l in linhas:
+        if l[1] in oficial:
+            of = oficial[l[1]].get(l[4], 0.0)
+            l[9:] = [round(of, 2), round(of - (l[8] or 0.0), 2)]
+            vistos.add((l[1], l[4]))
+    desc = {cod: d for ls in LINHAS.values() for _, cod, d in ls}
+    for m, cod, of in sorted((m, c, v) for m, porc in oficial.items() for c, v in porc.items()):
+        if (m, cod) in vistos or m not in dados["meses"]:
+            continue
+        r = CODIGOS.get(cod, {})
+        linhas.append([f"{safra_de(m)}/{safra_de(m) + 1}", m, "R" if m < dados["mes_base"] else "P",
+                       {"1": "RO", "2": "POUP", "3": "LCA"}.get(cod[2:3], ""), cod,
+                       "informado" if r.get("tipo") == "i" or cod in LINHAS_INFORMADAS else "calculado",
+                       r.get("titulo") or desc.get(cod, ""), "", 0.0, round(of, 2), round(of, 2)])
+    return linhas
 
 
 def linhas_codigos(dados, resultado, apl_cod):
     """Todos os códigos com valor: aplicação (média acumulada de julho até a posição, Doc 6 Anexo I 4.6-c/d),
-    ponderadores (seção 4) e as linhas de exigibilidade, limite, deficiência e excesso. valor_sisex fica para colar."""
+    ponderadores (seção 4) e as linhas de exigibilidade, limite, deficiência e excesso. Oficial e diferença: com_oficial."""
     tipo = {"i": "informado", "c": "calculado"}
     out = []
     for s, porm in resultado.items():
@@ -1054,29 +1107,6 @@ def linhas_codigos(dados, resultado, apl_cod):
     return out
 
 
-def cmd_validar(rodada, arquivo_sisex, tol=1.0):
-    """Compara codigos.csv da rodada com os valores do Sisex (colunas posicao ou mes, codigo, valor)."""
-    rod = Path(rodada)
-    nossos = {(r["posicao"].strip(), r["codigo"].strip()): r for r in ler(rod / "codigos.csv" if rod.is_dir() else rod)}
-    linhas, n_ok = [], 0
-    for n, r in enumerate(ler(arquivo_sisex), start=2):
-        k = (mes_da_linha({"mes": r.get("posicao") or r.get("mes")}), r["codigo"].strip())
-        sx = num(r["valor"])
-        nosso = num(nossos[k]["valor_doc6"]) if k in nossos else 0.0
-        ok = abs(sx - nosso) <= tol
-        n_ok += ok
-        linhas.append([*k, nossos[k]["tipo"] if k in nossos else "", round(nosso, 2), round(sx, 2), round(sx - nosso, 2),
-                       "OK" if ok else "DIFERENTE"])
-    linhas.sort(key=lambda l: -abs(l[5]))
-    saida = gravar(rod.parent / f"validacao_{rod.name}.csv" if rod.is_dir() else SAIDAS / "validacao.csv",
-                   ["posicao", "codigo", "tipo", "programa", "sisex", "diferenca", "resultado"], linhas)
-    print(f"{n_ok} de {len(linhas)} códigos iguais ao Sisex (tolerância R$ {br(tol)}) -> {saida}")
-    for l in linhas[:15]:
-        if l[6] != "OK":
-            print(f"  {l[0]} {l[1]} {l[2]:9} diferença {br_mil(l[5])}")
-    return linhas
-
-
 def cmd_rodar(pasta, data_base, tipo_if="banco", rodada=None):
     dados, res, avisos, classif, apl_cod = montar(pasta, data_base, tipo_if)
     rodada = rodada or f"{datetime.now():%Y-%m-%d_%H%M%S}"
@@ -1090,7 +1120,11 @@ def cmd_rodar(pasta, data_base, tipo_if="banco", rodada=None):
     gravar(destino / "classificacao.csv", ["id", "fonte", "codigo", "tipo", "motivo", "titulo"],
            [[i, fo, c, {"i": "informado", "c": "calculado"}.get(t, ""), mo, CODIGOS[c]["titulo"] if c else ""]
             for i, fo, c, t, mo in classif])
-    gravar(destino / "codigos.csv", CAB_CODIGOS, linhas_codigos(dados, resultado, apl_cod))
+    cods = com_oficial(linhas_codigos(dados, resultado, apl_cod), dados["oficial"], dados)
+    gravar(destino / "codigos.csv", CAB_CODIGOS, cods)
+    if dados["oficial"]:
+        dif = [l for l in cods if l[10] != "" and abs(l[10]) > 1]
+        print(f"Oficial: {len(dif)} códigos com diferença acima de R$ 1,00 (ver codigos.csv)")
     gravar(destino / "aplicacoes.csv", ["fonte_categoria", "mes", "saldo_medio_ponderado"],
            [[k, m, round(v, 2)] for k, porm in sorted(dados["apl"].items()) for m, v in sorted(porm.items())])
     gravar(destino / "exigibilidade.csv", ["ano_safra", "posicao", "tipo", "anexo", "codigo", "item", "valor"],
@@ -1428,6 +1462,12 @@ def cmd_exemplo(data_base="2026-11-02"):
            [[m, "pronaf", 0.0, 5e6] for m in meses("2026-07", 24)] + [[m, "geral", 3e6, 0.0] for m in meses("2026-07", 24)])
     (ex / "parametros.json").write_text(json.dumps({"prazo": {"RO_PRONAF": 10}, "liberacao": {"RO_PRONAF": {"2027-07": 20e6}},
                                                     "pct": {"RO_PRONAMP": {"2027-03": 60}}}, indent=1), encoding="utf-8")
+    # oficial inventado: o calculado das posições passadas com uma diferença em um código e um código a menos
+    dados, _, _, _, apl_cod = montar(ex, data_base)
+    cods = linhas_codigos(dados, calcular(dados, dados["params"]), apl_cod)
+    gravar(ex / "oficial.csv", ["posicao", "codigo", "valor"],
+           [[l[1], l[4], round(l[8] * (1.03 if l[4] == "3.1.13.49-9" else 1), 2)] for l in cods
+            if l[2] == "R" and l[4] != "3.2.12.18-7"])
     print(f"Entradas inventadas em {ex}\n")
     return cmd_rodar(ex, data_base, rodada=f"exemplo_{datetime.now():%Y-%m-%d_%H%M%S}")
 
@@ -1527,6 +1567,22 @@ def autoteste():
     check("mês da data-base: dias antes dela vêm do saldo diário; o código é o do dia 15",
           perto(res[("B", "2026-11")][1], 50.0) and res[("B", "2026-11")][0] == "3.1.30.45-8")
 
+    # oficial (Sisex) ao lado do calculado
+    du2 = {"2026-07": 10, "2026-08": 30, "2026-09": 20}
+    sr = serie_do_oficial({"2026-07": 10.0, "2026-08": 32.5, "2026-09": 26.0}, 2026, "2026-10", du2, {})
+    check("oficial acumulado vira série mensal e volta às mesmas posições",
+          perto(sr["2026-08"], 40.0) and all(perto(acum(sr, 2026, m, du2), v)
+                                            for m, v in (("2026-07", 10.0), ("2026-08", 32.5), ("2026-09", 26.0))))
+    check("mês passado sem posição oficial usa o calculado",
+          perto(serie_do_oficial({"2026-08": 32.5}, 2026, "2026-09", du2, {"2026-07": 10.0})["2026-08"], 40.0))
+    lin = [["2026/2027", "2026-08", "R", "RO", "3.1.13.49-9", "calculado", "", 5.0, 7.0, "", ""],
+           ["2026/2027", "2026-09", "R", "RO", "3.1.13.49-9", "calculado", "", 5.0, 7.0, "", ""]]
+    lin = com_oficial(lin, {"2026-08": {"3.2.12.18-7": 4.0}}, {"mes_base": "2026-11", "meses": meses("2026-07", 24)})
+    so_of = [l for l in lin if l[4] == "3.2.12.18-7"]
+    check("código só no oficial aparece com calculado zero, e vice-versa; posição sem oficial fica em branco",
+          lin[0][9:] == [0.0, -7.0] and lin[1][9:] == ["", ""] and len(so_of) == 1
+          and so_of[0][3] == "POUP" and so_of[0][8:] == [0.0, 4.0, 4.0])
+
     # classificação no código do Documento 6
     cl = lambda **k: classificar(dict({"fonte": "RO", "programa": "", "finalidade": "", "recursos": "",
                                        "beneficiario": "produtor", "linha": "", "taxa_aa": 0.0}, **k))[0]
@@ -1594,7 +1650,7 @@ def autoteste():
 
 def menu():
     print(f"\nExigibilidade v{VERSAO}\n  1 autoteste\n  2 exemplo (dados inventados)\n  3 rodar com as entradas reais\n"
-          "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)\n  6 validar uma rodada com o Sisex")
+          "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)")
     e = input("Número: ").strip()
     if e == "1":
         return ["autoteste"]
@@ -1608,8 +1664,6 @@ def menu():
     if e == "5":
         return ["estrutura", input("Pasta da projeção atual: ").strip().strip('"'),
                 "--mascarar", input("Nomes a esconder, separados por vírgula (Enter = nenhum): ").strip()]
-    if e == "6":
-        return ["validar", input("Pasta da rodada: ").strip().strip('"'), input("Arquivo com os valores do Sisex: ").strip().strip('"')]
     sys.exit("opção inválida")
 
 
@@ -1630,9 +1684,6 @@ def main(argv=None):
     s.add_argument("a")
     s.add_argument("b")
     s.add_argument("--mes")
-    s = sub.add_parser("validar")
-    s.add_argument("rodada")
-    s.add_argument("sisex")
     s = sub.add_parser("estrutura")
     s.add_argument("caminhos", nargs="+")
     s.add_argument("--mascarar", default="")
@@ -1652,8 +1703,6 @@ def main(argv=None):
         cmd_rodar(a.entradas, a.data_base, a.tipo_if, a.rodada)
     elif a.cmd == "comparar":
         cmd_comparar(a.a, a.b, a.mes)
-    elif a.cmd == "validar":
-        cmd_validar(a.rodada, a.sisex)
     elif a.cmd == "estrutura":
         cmd_estrutura(a.caminhos, a.mascarar)
     return 0

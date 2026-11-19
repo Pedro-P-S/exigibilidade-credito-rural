@@ -35,6 +35,7 @@ CSV, TXT (separador `;` `,` tab ou `|`) ou XLSX (1ª aba). Número com vírgula 
 | `parcelas` | sim | `id`, `data`, `valor` | parcela futura; a última liquida |
 | `liberacoes` | não | `id`, `data`, `valor`; para operação nova também `taxa_aa` e a classificação (`data_contratacao` vazia = data da liberação) | liberação futura que vem da base |
 | `saldos_diarios` | não (sem ele os meses passados ficam zero) | `id`, `data`, `saldo` e as colunas de classificação daquele dia | operação e dia útil, de 1º de julho do ano-safra até o dia útil antes da data-base. É daqui que sai o realizado: saldo médio do mês = soma dos dias úteis ÷ dias úteis, dia útil sem linha = zero (Doc 6, Anexo I, 4.6-b); código do mês = regra na linha do último dia útil até o dia 15 (Anexo I, 12.2-b) |
+| `oficial` | não | `posicao`, `codigo`, `valor` (o valor do código na posição, como está no Sisex) | posição e código |
 | `vsr` | sim | `mes` (ou `data`), `vsr_avista`, `vsr_poupanca` | apuração do VSR (realizada ou projetada) |
 | `lca` | sim | `data` (saldo diário) ou `mes` (saldo médio do mês projetado), `saldo` | dia ou mês |
 | `dir` | não | `mes`, `modalidade`, `captacao`, `aplicacao` (saldo médio do mês) | mês e modalidade |
@@ -61,14 +62,10 @@ CSV, TXT (separador `;` `,` tab ou `|`) ou XLSX (1ª aba). Número com vírgula 
 
 - `relatorio.html`: visão geral, detalhe dos anexos (com os códigos de limite) e simulação.
 - `classificacao.csv`: código de cada operação, se a instituição informa ou o Sisex calcula, e o motivo (`regra`, `informado`, `informado (regra daria X)`, `sem código no Documento 6`, `livre`).
-- `codigos.csv`: todos os códigos com valor, posição a posição: aplicações, ponderadores (seção 4), exigibilidade, limites, deficiência e excesso. Cada um marcado `informado` ou `calculado`, com as colunas `valor_sisex` e `diferenca` para conferir.
+- `codigos.csv`: todos os códigos com valor, posição a posição: aplicações, ponderadores (seção 4), exigibilidade, limites, deficiência e excesso. Cada um marcado `informado` ou `calculado`, com `calculado`, `oficial` e `diferenca` nas posições que vieram no arquivo `oficial`. Código que só existe num dos lados aparece com o outro em zero.
 - `exigibilidade.csv`, `aplicacoes.csv`, `saldo_operacoes.csv`.
 
-Validar com o Sisex: monte um arquivo com `posicao`, `codigo`, `valor` e rode
-```
-python exigibilidade.py validar saidas\rodadas\<rodada> <arquivo do Sisex>
-```
-Sai `validacao_<rodada>.csv` com OK/DIFERENTE por código, maior diferença primeiro. O relatório do Sisex lista as operações de cada código calculado (Doc 6, Anexo I, 12.1-e e 7.4-i), então dá para descer até a operação.
+O relatório do Sisex lista as operações de cada código calculado (Doc 6, Anexo I, 12.1-e e 7.4-i), então dá para descer da diferença até a operação. O valor oficial é a posição acumulada; o saldo médio de cada mês sai da diferença entre posições seguidas, pesada pelos dias úteis (Anexo I, 4.6-c/d), e alimenta a série dos diretores (oficial nos meses passados, projeção nos futuros).
 
 ## Regras implementadas
 
@@ -77,7 +74,7 @@ Sai `validacao_<rodada>.csv` com OK/DIFERENTE por código, maior diferença prim
 - **Ponderadores:** cada código da seção 4 ("Valor correspondente a N% da média do saldo informado no código X") vira fator 1 + N% do código X. Ex.: 3.1.13.49-9 (Pronaf custeio 2026/27 até 3% a.a.) tem 37% (4.1.34.19-2).
 - **Limites:** lidos da descrição de cada código de limite: ind./com. Pronaf 10% (3.1.13.48-2), investimento Pronamp 10% (3.1.41.39-9), pequenos e médios 10% com o excesso indo para a Geral (3.1.40.34-5 e 3.1.30.78-8), ABC+/RenovAgro 3,6% (3.1.30.87-4), PCA 2,4% (3.1.30.89-8), Res. 5.330 40% (3.1.12.09-8, 3.1.40.38-3, 3.1.32.01-6), Res. 2.238 60% da própria (3.1.30.53-7), CPR na Poupança 5% da própria (3.2.30.10-7), Res. 5.247 (3.2.20.29-6, 3.3.20.17-2, 3.3.40.09-7), Res. 4.259 (3.2.10.54-3, 3.2.10.72-5).
 - **Saldo médio do mês:** soma dos saldos dos dias úteis ÷ dias úteis do mês. Conta zero antes da 1ª liberação e depois da liquidação (Doc 6, Anexo I, 4.6-b).
-- **Código do mês:** o que a operação tinha no **dia 15** vale para o mês inteiro (Doc 6, Anexo I, 12.2-b).
+- **Código do mês:** o que a operação tinha no **dia 15** vale para o mês inteiro (Doc 6, Anexo I, 12.2-b). No realizado, a regra roda sobre a linha do `saldos_diarios` do último dia útil até o dia 15.
 - **Posição do mês:** média acumulada de julho até o mês, ponderada pelos dias úteis (Doc 6, Anexo I, 4.6-c/d).
 - **Anexo II (RO):** própria = 31,5% × (média do VSR à vista de jul a jun do ano anterior − R$ 500 mi), cooperativas 13% em 2026/27 e 22% em 2027/28, isenta se ≤ R$ 10 mi. Pronaf 35%, Pronamp 50%, Geral = o resto, cada uma + captação DIR. Deficiência e excesso separados (códigos 5.1.x); o excesso de Pronaf e Pronamp cobre a Geral.
 - **Anexo III (Poupança):** 70% da média do VSR; no mínimo 95% em crédito rural; exigibilidade líquida = total − aplicação DIR-Poup (2.2.50.00-9).
