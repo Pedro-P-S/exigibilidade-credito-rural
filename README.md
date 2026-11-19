@@ -2,10 +2,9 @@
 
 Calcula o **realizado** e a **projeção** das exigibilidades do crédito rural na forma do **MCR - Documento 6**: Anexo II (Recursos Obrigatórios, MCR 6-2), Anexo III (Poupança Rural, MCR 6-4) e Anexo IV (LCA, MCR 6-7). DIR, Pronaf, Pronamp e limites ficam dentro de cada anexo.
 
-Gera a **posição de cada mês** (média acumulada de julho até o mês, como o Sisex) do ano-safra atual e do seguinte inteiro, e um **HTML** com:
-- **Visão geral** (diretores): sobra ou falta no fechamento de junho e mês a mês;
-- **Detalhe dos anexos** (gestores): as linhas com os códigos do Documento 6;
-- **Parâmetros e simulação** (gestores): liberação, % de reembolso, prazo e DIR por mês. Recalcula na hora e salva os parâmetros para a próxima rodada.
+Gera a **posição de cada mês** (média acumulada de julho até o mês, como o Sisex) do ano-safra atual e do seguinte inteiro, e dois **HTML**:
+- **`diretores.html`**: uma linha por exigibilidade (Obrigatórios Pronaf, Obrigatórios Pronamp, Obrigatórios Geral, Poupança, LCA) com o excesso (+) ou a deficiência (−) até o mês e o fechamento de junho em destaque. Meses passados com o valor oficial (Sisex), meses futuros com a projeção partindo do oficial.
+- **`operacional.html`**: **Por exigibilidade** (um bloco por exigibilidade: exigibilidade, DIR, saldo médio do mês, aplicação média acumulada, limites, excesso e deficiência; Poupança e LCA com as duas contas, total e mínimo em crédito rural), **Detalhe por código** (linhas dos anexos com o código do Documento 6) e **Parâmetros e simulação** (liberação, % de reembolso, prazo e DIR, recalcula na hora, salva os parâmetros e gera o `diretores.html` com os parâmetros da tela). Onde há valor oficial aparecem calculado, oficial e diferença. Cores separam passado, mês da data-base e projeção.
 
 Programa: [exigibilidade.py](exigibilidade.py), arquivo único, só biblioteca padrão do Python (Excel `.xlsx` precisa do `openpyxl`). Regras: MCR Atualização nº 760 (22/10/2026). Todos os números de exemplo e dos testes são inventados. Prompts para um assistente de IA só de chat: [docs/prompt-gpt.md](docs/prompt-gpt.md).
 
@@ -14,7 +13,7 @@ Programa: [exigibilidade.py](exigibilidade.py), arquivo único, só biblioteca p
 1. Crie uma pasta, por exemplo `C:\exigibilidade`.
 2. No GitHub, abra `exigibilidade.py`, clique em **Raw**, `Ctrl+A`, `Ctrl+C`. Cole no Bloco de Notas e salve como `exigibilidade.py` na pasta, em **UTF-8**.
 3. Teste: no Spyder, abra o arquivo, aperte **F5** e digite `1`. No terminal: `python exigibilidade.py autoteste`. O `resumo_verificacao.txt` tem que terminar com `RESULTADO: TUDO OK`.
-4. Exemplo: menu `2` ou `python exigibilidade.py exemplo`. Abra o `relatorio.html` em `saidas\rodadas\exemplo_...\`. No topo tem que aparecer `CHECK simulação = Python: OK`.
+4. Exemplo: menu `2` ou `python exigibilidade.py exemplo`. Abra o `operacional.html` em `saidas\rodadas\exemplo_...\`. No topo tem que aparecer `CHECK simulação = Python: OK`.
 5. Dados reais: monte uma pasta de entradas (formatos abaixo, mesmo nome de arquivo do `exemplo\`) e rode:
    ```
    python exigibilidade.py rodar C:\exigibilidade\entradas --data-base 2026-11-20
@@ -60,7 +59,7 @@ CSV, TXT (separador `;` `,` tab ou `|`) ou XLSX (1ª aba). Número com vírgula 
 
 ## Saídas de cada rodada
 
-- `relatorio.html`: visão geral, detalhe dos anexos (com os códigos de limite) e simulação.
+- `diretores.html` e `operacional.html` (acima).
 - `classificacao.csv`: código de cada operação, se a instituição informa ou o Sisex calcula, e o motivo (`regra`, `informado`, `informado (regra daria X)`, `sem código no Documento 6`, `livre`).
 - `codigos.csv`: todos os códigos com valor, posição a posição: aplicações, ponderadores (seção 4), exigibilidade, limites, deficiência e excesso. Cada um marcado `informado` ou `calculado`, com `calculado`, `oficial` e `diferenca` nas posições que vieram no arquivo `oficial`. Código que só existe num dos lados aparece com o outro em zero.
 - `exigibilidade.csv`, `aplicacoes.csv`, `saldo_operacoes.csv`.

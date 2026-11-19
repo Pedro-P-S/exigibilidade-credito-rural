@@ -466,15 +466,50 @@ for _cod, (_an, _b, _base, _pct, _exc, _desc) in LIMITES.items():  # linhas dos 
                                                                                  "Excedente do 3.1.40.34-5 (vai para a Geral)"))
 LINHAS_INFORMADAS = {"1.3.10.00-5", "3.3.20.15-8"}  # as demais linhas de LINHAS o Sisex calcula
 
-# visão dos diretores: rótulo, anexo, chave do excesso, chave da deficiência
-RESUMO = [("Recursos Obrigatórios", "RO", "exc_total", "def_total"),
-          ("RO - Exigibilidade Geral", "RO", "exc_geral", "def_geral"),
-          ("RO - Pronaf", "RO", "exc_pronaf", "def_pronaf"),
-          ("RO - Pronamp", "RO", "exc_pronamp", "def_pronamp"),
-          ("Poupança Rural", "POUP", "exc_total", "def_total"),
-          ("Poupança - crédito rural (95%)", "POUP", "exc_sub", "def_sub"),
-          ("LCA", "LCA", "exc_total", "def_total"),
-          ("LCA - crédito rural (45%)", "LCA", "exc_sub", "def_sub")]
+# relatório dos diretores: uma linha por exigibilidade, sem soma (rótulo, anexo, chave do excesso, chave da deficiência)
+RESUMO = [("Obrigatórios Pronaf", "RO", "exc_pronaf", "def_pronaf"),
+          ("Obrigatórios Pronamp", "RO", "exc_pronamp", "def_pronamp"),
+          ("Obrigatórios Geral", "RO", "exc_geral", "def_geral"),
+          ("Poupança", "POUP", "exc_total", "def_total"),
+          ("LCA", "LCA", "exc_total", "def_total")]
+
+# operacional, visão por exigibilidade: blocos empilhados. Linha = chave do anexo (rótulo de LINHAS) ou [chave, rótulo].
+# "mes:<baldes>" = saldo médio do mês das aplicações que caem nesses baldes (com ponderador, sem limite);
+# "dir:<modalidades>" = aplicação DIR acumulada; "#" = título de uma das duas contas.
+BLOCOS = [
+    ["Obrigatórios Pronaf", "RO", [["sub_pronaf", "Subexigibilidade"], ["capt_dir_pronaf", "Captação DIR"],
+                                   ["dir:pronaf", "Aplicação DIR"], ["mes:ap_pronaf", "Saldo médio do mês"],
+                                   ["ap_pronaf", "Aplicação média acumulada"], "lim_3.1.13.48-2", "lim_3.1.12.09-8",
+                                   ["exc_pronaf", "Excesso"], ["def_pronaf", "Deficiência"]]],
+    ["Obrigatórios Pronamp", "RO", [["sub_pronamp", "Subexigibilidade"], ["capt_dir_pronamp", "Captação DIR"],
+                                    ["dir:pronamp", "Aplicação DIR"], ["mes:ap_pronamp", "Saldo médio do mês"],
+                                    ["ap_pronamp", "Aplicação média acumulada"], "lim_3.1.41.39-9", "lim_3.1.40.34-5",
+                                    "exc_3.1.40.34-5", "lim_3.1.40.38-3", ["exc_pronamp", "Excesso"],
+                                    ["def_pronamp", "Deficiência"]]],
+    ["Obrigatórios Geral", "RO", [["geral", "Exigibilidade Geral"], ["capt_dir_geral", "Captação DIR"],
+                                  ["dir:geral", "Aplicação DIR"], ["mes:ap_geral", "Saldo médio do mês"],
+                                  ["ap_geral", "Aplicação média acumulada"], "lim_3.1.30.87-4", "lim_3.1.30.89-8",
+                                  "lim_3.1.32.01-6", "lim_3.1.30.53-7", ["exc_geral", "Excesso"],
+                                  ["def_geral", "Deficiência"]]],
+    ["Poupança", "POUP", [["#", "Conta 1: total"], ["exig_total", "Exigibilidade"], ["capt_dir", "Captação DIR"],
+                          ["dir:poup", "Aplicação DIR"], ["mes:ap_cr+ap_cpr", "Saldo médio do mês"],
+                          ["ap_total", "Aplicação média acumulada"], ["cpr_limite", "Limite da CPR (5% da própria)"],
+                          "lim_3.2.30.10-7", "lim_3.2.10.54-3", "lim_3.2.10.72-5", "lim_3.2.20.29-6",
+                          ["exc_total", "Excesso"], ["def_total", "Deficiência"],
+                          ["#", "Conta 2: mínimo em crédito rural (95%)"], ["sub", "Subexigibilidade crédito rural"],
+                          ["ap_cr", "Aplicação em crédito rural"], ["exc_sub", "Excesso"], ["def_sub", "Deficiência"]]],
+    ["LCA", "LCA", [["#", "Conta 1: total"], ["exig_total", "Direcionamento"], ["capt_dir_cr", "Captação DIR-LCA-CR"],
+                    ["capt_dir_livre", "Captação DIR-LCA-Livre"], ["dir:lca_cr+lca_livre", "Aplicação DIR"],
+                    ["mes:ap_cr+ap_fac", "Saldo médio do mês"], ["ap_total", "Aplicação média acumulada"],
+                    ["faculdade", "Faculdade"], ["ap_fac", "Aplicado na faculdade (até o limite)"], "lim_3.3.40.09-7",
+                    ["exc_ro", "Excesso de Obrigatórios (só em junho)"], ["exc_total", "Excesso"],
+                    ["def_total", "Deficiência"], ["#", "Conta 2: mínimo em crédito rural (45%)"],
+                    ["sub", "Subdirecionamento crédito rural"], ["ap_cr", "Aplicação em crédito rural"],
+                    "lim_3.3.20.17-2", ["exc_sub", "Excesso"], ["def_sub", "Deficiência"]]],
+]
+# o que o relatório dos diretores leva da rodada (além da série oficial e dos parâmetros)
+CHAVES_DIRETORES = ["versao", "data_base", "mes_base", "meses", "safras", "du", "bases", "pagos", "dir", "grupos",
+                    "dir_modalidades", "limites", "balde", "resumo", "rodada", "sem_oficial"]
 
 
 # ---------------------------------------------------------------- leitura e utilidades
@@ -976,9 +1011,9 @@ def sisex(safra, m, apl, dirs, base, du):
     return {"RO": ro, "POUP": po, "LCA": lc}
 
 
-def calcular(dados, params):
-    """{safra: {mes: sisex}} das duas safras do horizonte."""
-    apl = com_parametros(dados["apl"], dados["pagos"], params, dados["meses"], dados["mes_base"])
+def calcular(dados, params, apl=None):
+    """{safra: {mes: sisex}} das duas safras do horizonte (apl: padrão = série calculada)."""
+    apl = com_parametros(apl or dados["apl"], dados["pagos"], params, dados["meses"], dados["mes_base"])
     dirs = dir_final(dados["dir"], params)
     return {str(s): {m: sisex(s, m, apl, dirs, dados["bases"][str(s)], dados["du"]) for m in meses(f"{s}-07", 12)}
             for s in dados["safras"]}
@@ -1036,7 +1071,8 @@ def montar(pasta, data_base, tipo_if="banco"):
              "meses": meses_h, "safras": [s0, s0 + 1], "du": du, "oficial": oficial, "apl_oficial": por_categoria(apl_of),
              "bases": {str(s): bases(s, vsr, lca, tipo_if, avisos) for s in (s0, s0 + 1)},
              "apl": por_categoria(apl_cod), "pagos": dict(pg), "dir": dirs, "params": params,
-             "grupos": list(GRUPOS), "dir_modalidades": DIR_MODALIDADES, "limites": LIMITES, "balde": BALDE, "linhas": LINHAS, "resumo": RESUMO}
+             "grupos": list(GRUPOS), "dir_modalidades": DIR_MODALIDADES, "limites": LIMITES, "balde": BALDE, "linhas": LINHAS, "resumo": RESUMO, "blocos": BLOCOS,
+             "chaves_diretores": CHAVES_DIRETORES, "sem_oficial": [m for m in meses_h if m < mes_base and m not in oficial]}
     return dados, res, avisos, classif, apl_cod
 
 
@@ -1115,6 +1151,7 @@ def cmd_rodar(pasta, data_base, tipo_if="banco", rodada=None):
         sys.exit(f"rodada {rodada} já existe em {destino}; use outro --rodada")
     resultado = calcular(dados, dados["params"])
     dados["rodada"], dados["avisos"], dados["python"] = rodada, avisos, resultado
+    dados["python_oficial"] = oficial = calcular(dados, dados["params"], dados["apl_oficial"])
     gravar(destino / "saldo_operacoes.csv", ["id", "mes", "fonte", "codigo", "saldo_medio"],
            [[i, m, CODIGOS[c]["fonte"] if c else "", c, round(s, 2)] for (i, m), (c, s) in sorted(res.items())])
     gravar(destino / "classificacao.csv", ["id", "fonte", "codigo", "tipo", "motivo", "titulo"],
@@ -1130,15 +1167,16 @@ def cmd_rodar(pasta, data_base, tipo_if="banco", rodada=None):
     gravar(destino / "exigibilidade.csv", ["ano_safra", "posicao", "tipo", "anexo", "codigo", "item", "valor"],
            [[f"{s}/{int(s) + 1}", m, "R" if m < dados["mes_base"] else "P", an, cod, desc, round(v[an][k], 2)]
             for s, porm in resultado.items() for m, v in porm.items() for an in LINHAS for k, cod, desc in LINHAS[an]])
-    (destino / "relatorio.html").write_text(html(dados), encoding="utf-8")
+    (destino / "operacional.html").write_text(html_operacional(dados), encoding="utf-8")
+    (destino / "diretores.html").write_text(html_diretores(dados), encoding="utf-8")
     for a in avisos:
         print("AVISO:", a)
-    for s, porm in resultado.items():
+    for s, porm in oficial.items():
         jun = porm[f"{int(s) + 1}-06"]
-        print(f"\n{s}/{int(s) + 1} - fechamento de junho (sobra + / falta -):")
+        print(f"\n{s}/{int(s) + 1} - fechamento de junho, como os diretores veem (excesso + / deficiência -):")
         for rot, an, exc, dfc in RESUMO:
             print(f"  {rot:32} {br_mil(jun[an][exc] - jun[an][dfc])}")
-    print(f"\nRelatório: {destino / 'relatorio.html'}")
+    print(f"\nRelatórios: {destino / 'operacional.html'} e {destino / 'diretores.html'}")
     return destino
 
 
@@ -1261,49 +1299,35 @@ def cmd_estrutura(caminhos, mascarar="", saida=None):
 
 # ---------------------------------------------------------------- relatório HTML (visão dos diretores + gestores)
 
-HTML_MODELO = r"""<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Exigibilidade do Crédito Rural</title>
-<style>
-:root{--bg:#f7f7f5;--card:#fff;--tx:#1d1d1b;--mut:#6b6b66;--ln:#e2e1dc;--pos:#1f7a4d;--neg:#b3261e;--acc:#2f5d8a;--posbg:#e6f2ea;--negbg:#fbe9e7}
-@media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#20201e;--tx:#ecebe6;--mut:#a3a29c;--ln:#3a3936;--pos:#6cc799;--neg:#f2867c;--acc:#8db4dd;--posbg:#1d3328;--negbg:#3a2220}}
+CSS = r"""
+:root{--bg:#f7f7f5;--card:#fff;--tx:#1d1d1b;--mut:#6b6b66;--ln:#e2e1dc;--pos:#1f7a4d;--neg:#b3261e;--acc:#2f5d8a;--posbg:#e6f2ea;--negbg:#fbe9e7;--pa:#efeeea;--at:#fbf1cf;--fu:#e8f0f8}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#20201e;--tx:#ecebe6;--mut:#a3a29c;--ln:#3a3936;--pos:#6cc799;--neg:#f2867c;--acc:#8db4dd;--posbg:#1d3328;--negbg:#3a2220;--pa:#2a2a27;--at:#3a3420;--fu:#1f2a36}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{padding:20px 24px 8px}h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px}h3{font-size:14px;margin:16px 0 6px;color:var(--mut)}
 .meta{color:var(--mut);font-size:13px}.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:8px}
 .ok{background:var(--posbg);color:var(--pos)}.falhou{background:var(--negbg);color:var(--neg)}
-nav{display:flex;gap:4px;padding:0 24px;border-bottom:1px solid var(--ln)}nav button{background:none;border:0;border-bottom:2px solid transparent;padding:10px 12px;color:var(--mut);font:inherit;cursor:pointer}
+nav{display:flex;gap:4px;padding:0 24px;border-bottom:1px solid var(--ln);flex-wrap:wrap}nav button{background:none;border:0;border-bottom:2px solid transparent;padding:10px 12px;color:var(--mut);font:inherit;cursor:pointer}
 nav button.ativo{color:var(--tx);border-color:var(--acc)}main{padding:8px 24px 40px}section{display:none}section.ativo{display:block}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}.card{background:var(--card);border:1px solid var(--ln);border-radius:8px;padding:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}.card{background:var(--card);border:1px solid var(--ln);border-radius:8px;padding:12px}
 .card .r{color:var(--mut);font-size:12px}.card .v{font-size:20px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
 .tab{overflow-x:auto;background:var(--card);border:1px solid var(--ln);border-radius:8px}table{border-collapse:collapse;width:max-content;min-width:100%}
 th,td{padding:5px 8px;border-bottom:1px solid var(--ln);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--card)}
 th{font-weight:600;color:var(--mut);font-size:12px}.pos{color:var(--pos)}.neg{color:var(--neg)}.cod{color:var(--mut);font-size:12px;margin-right:6px}
-input{width:72px;padding:3px 4px;border:1px solid var(--ln);border-radius:4px;background:var(--bg);color:var(--tx);font:inherit;text-align:right}
-.acoes{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.acoes button,.acoes label{padding:6px 12px;border:1px solid var(--ln);border-radius:6px;background:var(--card);color:var(--tx);font:inherit;cursor:pointer}
+.pa{background:var(--pa)}.at{background:var(--at)}.fu{background:var(--fu)}th.jun,td.jun{font-weight:700}
+tr.conta td{font-weight:600;padding-top:12px}tr.sub td{color:var(--mut);font-size:12px}tr.sub td:first-child{padding-left:22px}
+.leg span{display:inline-block;padding:1px 8px;border-radius:4px;margin-right:6px}
+input{width:110px;padding:3px 4px;border:1px solid var(--ln);border-radius:4px;background:var(--bg);color:var(--tx);font:inherit;text-align:right}
+select{padding:4px;border:1px solid var(--ln);border-radius:4px;background:var(--card);color:var(--tx);font:inherit}
+.acoes{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;align-items:center}.acoes button,.acoes label{padding:6px 12px;border:1px solid var(--ln);border-radius:6px;background:var(--card);color:var(--tx);font:inherit;cursor:pointer}
 .avisos{background:var(--negbg);color:var(--neg);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:13px}.nota{color:var(--mut);font-size:12px}
 @media (max-width:600px){header,main{padding-left:16px;padding-right:16px}nav{padding:0 16px}}
-</style></head><body>
-<header><h1>Exigibilidade do Crédito Rural</h1><div class="meta" id="meta"></div></header>
-<nav><button class="ativo" data-s="geral">Visão geral</button><button data-s="detalhe">Detalhe dos anexos</button><button data-s="param">Parâmetros e simulação</button></nav>
-<main>
-<section id="geral" class="ativo"></section>
-<section id="detalhe"></section>
-<section id="param">
-<p class="nota">Campos em reais, valor exato (as tabelas dos relatórios mostram R$ milhões). Liberação e % de reembolso por grupo e mês; a liberação nova é paga em parcela única depois do número de meses informado. DIR: saldo médio do mês (captação e aplicação). Tudo recalcula na hora.</p>
-<div class="acoes"><button id="salvar">Salvar parâmetros (parametros.json)</button><label>Carregar parâmetros <input type="file" id="carregar" accept=".json" hidden></label><button id="restaurar">Voltar aos parâmetros da rodada</button></div>
-<div id="campos"></div>
-</section>
-</main>
-<script type="application/json" id="dados">__DADOS__</script>
-<script>
+"""
+
+# Cópia exata em JavaScript de pct_de, com_parametros, dir_final, acum, aplicar e sisex (ADR 0003).
+MOTOR_JS = r"""
 "use strict";
 const D = JSON.parse(document.getElementById("dados").textContent);
 const GR = {RO_PRONAF:["RO","pronaf"],RO_PRONAMP:["RO","pronamp"],RO_DEMAIS:["RO","demais"],POUP:["POUP","credito_rural"],LCA:["LCA","credito_rural"]};
-const NOME_GR = {RO_PRONAF:"RO - Pronaf",RO_PRONAMP:"RO - Pronamp",RO_DEMAIS:"RO - Demais",POUP:"Poupança Rural",LCA:"LCA"};
-const NOME_DIR = {geral:"DIR-Geral",pronaf:"DIR-Pronaf",pronamp:"DIR-Pronamp",poup:"DIR-Poup",lca_cr:"DIR-LCA-CR",lca_livre:"DIR-LCA-Livre"};
-let P = JSON.parse(JSON.stringify(D.params || {}));
-
-// ---- cópia exata de pct_de, com_parametros, dir_final, acum e sisex do Python
 function mesesSafra(s){const r=[];let a=s,m=7;for(let i=0;i<12;i++){r.push(a+"-"+String(m).padStart(2,"0"));if(m===12){a++;m=1}else m++}return r}
 function g(o,...ks){for(const k of ks){if(o==null)return undefined;o=o[k]}return o}
 function pctDe(P,gr,m){return g(P,"pct",gr,m)??g(P,"pct_grupo",gr)??P.pct_geral??80}
@@ -1342,32 +1366,87 @@ function sisex(s,m,apl,dirs,base){
   lc.ap_fac=Math.min(lc.ap_fac+dc("lca_livre",1),lc.faculdade);lc.ap_total=lc.ap_cr+lc.ap_fac;
   lc.def_sub=Math.max(0,lc.sub-lc.ap_cr);lc.exc_sub=Math.max(0,lc.ap_cr-lc.sub);lc.def_total=Math.max(0,lc.exig_total-lc.ap_total);lc.exc_total=Math.max(0,lc.ap_total-lc.exig_total);
   return {RO:ro,POUP:po,LCA:lc}}
-function calcular(P){const apl=comParametros(D.apl,D.pagos,P,D.meses,D.mes_base);const dirs=dirFinal(D.dir,P);const out={};
-  for(const s of D.safras){out[s]={};for(const m of mesesSafra(s))out[s][m]=sisex(s,m,apl,dirs,D.bases[s])}return out}
-
-// ---- tela
+function calcular(P,apl=D.apl){const a=comParametros(apl,D.pagos,P,D.meses,D.mes_base);const dirs=dirFinal(D.dir,P);const out={};
+  for(const s of D.safras){out[s]={};for(const m of mesesSafra(s))out[s][m]=sisex(s,m,a,dirs,D.bases[s])}return out}
+// ---- tela (comum aos dois relatórios)
 const mi=v=>(v/1e6).toLocaleString("pt-BR",{minimumFractionDigits:1,maximumFractionDigits:1});
-const cls=v=>v>0.05e6?"pos":v<-0.05e6?"neg":"";
+const reais=v=>v===undefined||v===""?"":(+v).toLocaleString("pt-BR",{maximumFractionDigits:2});
+const sinal=(v,lim)=>v>lim?"pos":v<-lim?"neg":"";
 const rot=m=>["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"][+m.slice(5)-1]+"/"+m.slice(2,4);
-const tipo=m=>m<D.mes_base?"R":"P";
-function conferir(){let ok=true;const r=calcular(D.params||{});
-  for(const s in D.python)for(const m in D.python[s])for(const an in D.python[s][m])for(const k in D.python[s][m][an])
-    if(Math.abs(D.python[s][m][an][k]-r[s][m][an][k])>0.01)ok=false;return ok}
-function cabecalho(s){return "<tr><th></th>"+mesesSafra(s).map(m=>`<th>${rot(m)} ${tipo(m)}</th>`).join("")+"</tr>"}
-function render(){const R=calcular(P);let h="",d="";
-  for(const s of D.safras){const jun=(s+1)+"-06";
-    h+=`<h2>Ano-safra ${s}/${s+1} · fechamento de junho (sobra + / falta −, R$ mi)</h2><div class="cards">`;
-    for(const [r,an,e,f] of D.resumo){const v=R[s][jun][an][e]-R[s][jun][an][f];h+=`<div class="card"><div class="r">${r}</div><div class="v ${cls(v)}">${mi(v)}</div></div>`}
-    h+=`</div><h3>Posição de cada mês (média acumulada desde julho)</h3><div class="tab"><table>${cabecalho(s)}`;
-    for(const [r,an,e,f] of D.resumo){h+=`<tr><td>${r}</td>`+mesesSafra(s).map(m=>{const v=R[s][m][an][e]-R[s][m][an][f];return `<td class="${cls(v)}">${mi(v)}</td>`}).join("")+"</tr>"}
-    h+="</table></div>";
-    for(const an of ["RO","POUP","LCA"]){const nome={RO:"Anexo II - Recursos Obrigatórios",POUP:"Anexo III - Poupança Rural",LCA:"Anexo IV - LCA"}[an];
-      d+=`<h2>${s}/${s+1} · ${nome} (R$ mi)</h2><div class="tab"><table>${cabecalho(s)}`;
-      for(const [k,cod,desc] of D.linhas[an])d+=`<tr><td><span class="cod">${cod}</span>${desc}</td>`+mesesSafra(s).map(m=>`<td>${mi(R[s][m][an][k])}</td>`).join("")+"</tr>";
-      d+="</table></div>"}}
-  document.getElementById("geral").innerHTML=h+'<p class="nota">R = realizado, P = projetado. A fonte de cada operação no mês é a do dia 15.</p>';
-  document.getElementById("detalhe").innerHTML=d}
-const reais=v=>v===undefined?"":(+v).toLocaleString("pt-BR",{maximumFractionDigits:2});
+const periodo=m=>(m<D.mes_base?"pa":m===D.mes_base?"at":"fu")+(m.slice(5)==="06"?" jun":"");
+const cabecalho=(s,primeira="")=>`<tr><th>${primeira}</th>`+mesesSafra(s).map(m=>`<th class="${periodo(m)}">${rot(m)}</th>`).join("")+"</tr>";
+const dataBR=d=>d.split("-").reverse().join("/");
+"""
+
+DIRETORES_MODELO = r"""<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exigibilidade - diretores</title><style>__CSS__</style></head><body>
+<header><h1>Exigibilidade do Crédito Rural</h1><div class="meta" id="meta"></div></header>
+<main id="corpo"></main>
+<script type="application/json" id="dados">__DADOS__</script>
+<script>__MOTOR__
+const R=calcular(D.params||{});let h=`<p class="nota leg"><span class="pa">meses passados: valor oficial (Sisex)</span><span class="at">mês da data-base</span><span class="fu">projeção, partindo do oficial</span></p>`;
+if(D.sem_oficial.length)h+=`<div class="avisos">Sem valor oficial em ${D.sem_oficial.map(rot).join(", ")}: nesses meses foi usado o valor calculado pelo programa.</div>`;
+for(const s of D.safras){const jun=(s+1)+"-06";
+  h+=`<h2>Ano-safra ${s}/${s+1}</h2><h3>Fechamento de junho/${String(s+1).slice(2)}: excesso (+) / deficiência (−), R$ milhões</h3><div class="cards">`;
+  for(const [r,an,e,f] of D.resumo){const v=R[s][jun][an][e]-R[s][jun][an][f];h+=`<div class="card"><div class="r">${r}</div><div class="v ${sinal(v,5e4)}">${mi(v)}</div></div>`}
+  h+=`</div><h3>Excesso (+) / deficiência (−) até o mês, R$ milhões</h3><div class="tab"><table>${cabecalho(s)}`;
+  for(const [r,an,e,f] of D.resumo)h+=`<tr><td>${r}</td>`+mesesSafra(s).map(m=>{const v=R[s][m][an][e]-R[s][m][an][f];return `<td class="${periodo(m)} ${sinal(v,5e4)}">${mi(v)}</td>`}).join("")+"</tr>";
+  h+="</table></div>"}
+document.getElementById("corpo").innerHTML=h+`<p class="nota">Posição de cada mês = média acumulada desde julho, como no Sisex (MCR, Documento 6). Parâmetros da gerência: ${D.origem}.</p>`;
+document.getElementById("meta").textContent=`Data-base ${dataBR(D.data_base)} · rodada ${D.rodada} · v${D.versao}`;
+</script></body></html>"""
+
+OPERACIONAL_MODELO = r"""<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exigibilidade - operacional</title><style>__CSS__</style></head><body>
+<header><h1>Exigibilidade do Crédito Rural · operacional</h1><div class="meta" id="meta"></div>
+<div class="acoes"><label>Ano-safra <select id="safra"></select></label><button id="gerar">Gerar relatório dos diretores com estes parâmetros</button></div>
+<p class="nota leg"><span class="pa">passado: calculado pelo programa</span><span class="at">mês da data-base</span><span class="fu">projeção</span> Valores em reais. Onde há valor oficial, as linhas "oficial" e "diferença" (oficial − calculado) aparecem embaixo.</p></header>
+<nav><button class="ativo" data-s="blocos">Por exigibilidade</button><button data-s="detalhe">Detalhe por código</button><button data-s="param">Parâmetros e simulação</button></nav>
+<main>
+<section id="blocos" class="ativo"></section>
+<section id="detalhe"></section>
+<section id="param">
+<p class="nota">Campos em reais, valor exato. Liberação e % de reembolso por grupo e mês; a liberação nova é paga em parcela única depois do número de meses informado. DIR: saldo médio do mês (captação e aplicação). Tudo recalcula na hora.</p>
+<div class="acoes"><button id="salvar">Salvar parâmetros (parametros.json)</button><label>Carregar parâmetros <input type="file" id="carregar" accept=".json" hidden></label><button id="restaurar">Voltar aos parâmetros da rodada</button></div>
+<div id="campos"></div>
+</section>
+</main>
+<script type="application/json" id="dados">__DADOS__</script>
+<script type="application/json" id="modelo-diretores">__MODELO_DIRETORES__</script>
+<script>__MOTOR__
+const NOME_GR = {RO_PRONAF:"Obrigatórios Pronaf",RO_PRONAMP:"Obrigatórios Pronamp",RO_DEMAIS:"Obrigatórios Geral",POUP:"Poupança",LCA:"LCA"};
+const NOME_DIR = {geral:"DIR-Geral",pronaf:"DIR-Pronaf",pronamp:"DIR-Pronamp",poup:"DIR-Poup",lca_cr:"DIR-LCA-CR",lca_livre:"DIR-LCA-Livre"};
+const LIN = {};for(const an in D.linhas){LIN[an]={};for(const [k,cod,desc] of D.linhas[an])LIN[an][k]=[cod,desc]}
+let P = JSON.parse(JSON.stringify(D.params || {}));
+function conferir(){const igual=(py,js)=>{for(const s in py)for(const m in py[s])for(const an in py[s][m])for(const k in py[s][m][an])
+    if(Math.abs(py[s][m][an][k]-js[s][m][an][k])>0.01)return false;return true};
+  return igual(D.python,calcular(D.params||{}))&&igual(D.python_oficial,calcular(D.params||{},D.apl_oficial))}
+const safraSel=()=>+document.getElementById("safra").value;
+const r0=v=>(Math.round(v)+0).toLocaleString("pt-BR");  // +0 tira o "-0"
+function linhas(s,an,k,rotulo,cod,val){  // linha calculada + oficial e diferença onde há oficial
+  let h=`<tr><td>${rotulo}</td>`+mesesSafra(s).map(m=>`<td class="${periodo(m)}">${r0(val(m))}</td>`).join("")+"</tr>";
+  if(cod&&mesesSafra(s).some(m=>D.oficial[m])){
+    h+=`<tr class="sub"><td>oficial</td>`+mesesSafra(s).map(m=>`<td class="${periodo(m)}">${D.oficial[m]?r0(D.oficial[m][cod]||0):""}</td>`).join("")+"</tr>";
+    h+=`<tr class="sub"><td>diferença</td>`+mesesSafra(s).map(m=>{if(!D.oficial[m])return `<td class="${periodo(m)}"></td>`;const d=(D.oficial[m][cod]||0)-val(m);return `<td class="${periodo(m)} ${sinal(d,1)}">${r0(d)}</td>`}).join("")+"</tr>"}
+  return h}
+function render(){const R=calcular(P),s=safraSel(),apl=comParametros(D.apl,D.pagos,P,D.meses,D.mes_base),dirs=dirFinal(D.dir,P);let b="",d="";
+  for(const [nome,an,rows] of D.blocos){b+=`<h2>${nome} · ${s}/${s+1}</h2><div class="tab"><table>${cabecalho(s)}`;
+    for(const r of rows){const [k,rotulo]=typeof r==="string"?[r,LIN[an][r][1]]:r;
+      if(k==="#"){b+=`<tr class="conta"><td colspan="13">${rotulo}</td></tr>`;continue}
+      if(k.startsWith("mes:")){const bs=k.slice(4).split("+");const cats=Object.keys(D.balde[an]).filter(c=>bs.includes(D.balde[an][c]))
+          .concat(Object.keys(D.limites).filter(c=>D.limites[c][0]===an&&bs.includes(D.limites[c][1])));
+        b+=linhas(s,an,k,rotulo,"",m=>cats.reduce((t,c)=>t+(g(apl,an+"|"+c,m)||0),0));continue}
+      if(k.startsWith("dir:")){const mods=k.slice(4).split("+");
+        b+=linhas(s,an,k,rotulo,"",m=>mods.reduce((t,mod)=>{const sr={};for(const x in (dirs[mod]||{}))sr[x]=dirs[mod][x][1];return t+acum(sr,s,m)},0));continue}
+      b+=linhas(s,an,k,rotulo,LIN[an][k][0],m=>R[s][m][an][k]??0)}
+    b+="</table></div>"}
+  for(const an of ["RO","POUP","LCA"]){const nome={RO:"Anexo II - Obrigatórios",POUP:"Anexo III - Poupança Rural",LCA:"Anexo IV - LCA"}[an];
+    d+=`<h2>${nome} · ${s}/${s+1}</h2><div class="tab"><table>${cabecalho(s)}`;
+    for(const [k,cod,desc] of D.linhas[an])d+=linhas(s,an,k,`<span class="cod">${cod}</span>${desc}`,cod,m=>R[s][m][an][k]??0);
+    d+="</table></div>"}
+  document.getElementById("blocos").innerHTML=b;document.getElementById("detalhe").innerHTML=d+'<p class="nota">Códigos de aplicação um a um: codigos.csv da rodada.</p>'}
 function campo(caminho,valor){return `<input data-c="${caminho}" value="${reais(valor)}">`}
 function atualizarPct(){document.querySelectorAll('#campos input[data-c^="pct"]').forEach(e=>{const [t,x,m]=e.dataset.c.split("|");
   if(t==="pct")e.value=reais(pctDe(P,x,m));else if(t==="pct_grupo")e.value=reais(g(P,"pct_grupo",x)??P.pct_geral??80)})}
@@ -1387,19 +1466,38 @@ document.getElementById("campos").addEventListener("input",e=>{const c=e.target.
   else if(p[0]==="pct_grupo"){P.pct_grupo=P.pct_grupo||{};if(isNaN(v))delete P.pct_grupo[p[1]];else P.pct_grupo[p[1]]=v;if(P.pct)delete P.pct[p[1]];atualizarPct()}
   else{const [t,x,m]=p;P[t]=P[t]||{};P[t][x]=P[t][x]||{};if(isNaN(v))delete P[t][x][m];else P[t][x][m]=v}
   render()});
-document.getElementById("salvar").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(P,null,1)],{type:"application/json"}));a.download="parametros.json";a.click()};
+const baixar=(nome,txt,tipo)=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([txt],{type:tipo}));a.download=nome;a.click()};
+document.getElementById("salvar").onclick=()=>baixar("parametros.json",JSON.stringify(P,null,1),"application/json");
+document.getElementById("gerar").onclick=()=>{const dd=Object.fromEntries(D.chaves_diretores.map(k=>[k,D[k]]));
+  Object.assign(dd,{apl:D.apl_oficial,params:P,origem:`simulação da tela de ${new Date().toLocaleString("pt-BR")}`});
+  const tpl=JSON.parse(document.getElementById("modelo-diretores").textContent);
+  baixar("diretores.html",tpl.replace("__DA"+"DOS__",()=>JSON.stringify(dd).replace(/<\//g,"<\\/")),"text/html")};
 document.getElementById("carregar").onchange=e=>{const f=e.target.files[0];if(!f)return;f.text().then(t=>{P=JSON.parse(t);montarCampos();render()})};
 document.getElementById("restaurar").onclick=()=>{P=JSON.parse(JSON.stringify(D.params||{}));montarCampos();render()};
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{document.querySelectorAll("nav button,section").forEach(x=>x.classList.remove("ativo"));b.classList.add("ativo");document.getElementById(b.dataset.s).classList.add("ativo")});
+const sel=document.getElementById("safra");sel.innerHTML=D.safras.map(s=>`<option value="${s}">${s}/${s+1}</option>`).join("");sel.onchange=render;
 const ok=conferir();
-document.getElementById("meta").innerHTML=`Data-base ${D.data_base.split("-").reverse().join("/")} · rodada ${D.rodada} · v${D.versao}<span class="badge ${ok?"ok":"falhou"}">CHECK simulação = Python: ${ok?"OK":"FALHOU"}</span>`
+document.getElementById("meta").innerHTML=`Data-base ${dataBR(D.data_base)} · rodada ${D.rodada} · v${D.versao}<span class="badge ${ok?"ok":"falhou"}">CHECK simulação = Python: ${ok?"OK":"FALHOU"}</span>`
   +(D.avisos.length?`<div class="avisos">${D.avisos.map(a=>"AVISO: "+a).join("<br>")}</div>`:"");
 montarCampos();render();
 </script></body></html>"""
 
+_json = lambda x: json.dumps(x, ensure_ascii=False).replace("</", "<\\/")
+DIRETORES_HTML = DIRETORES_MODELO.replace("__CSS__", CSS).replace("__MOTOR__", MOTOR_JS)
+OPERACIONAL_HTML = OPERACIONAL_MODELO.replace("__CSS__", CSS).replace("__MOTOR__", MOTOR_JS)
 
-def html(dados):
-    return HTML_MODELO.replace("__DADOS__", json.dumps(dados, ensure_ascii=False).replace("</", "<\\/"))
+
+def dados_diretores(dados, params, origem):
+    """O que o relatório dos diretores recebe: a série oficial (oficial no passado, projeção no futuro) e os parâmetros."""
+    return dict({k: dados[k] for k in CHAVES_DIRETORES}, apl=dados["apl_oficial"], params=params, origem=origem)
+
+
+def html_diretores(dados):
+    return DIRETORES_HTML.replace("__DADOS__", _json(dados_diretores(dados, dados["params"], "parametros.json da rodada")))
+
+
+def html_operacional(dados):
+    return OPERACIONAL_HTML.replace("__DADOS__", _json(dados)).replace("__MODELO_DIRETORES__", _json(DIRETORES_HTML))
 
 
 # ---------------------------------------------------------------- exemplo e autoteste (dados inventados)
