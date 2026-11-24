@@ -25,7 +25,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.0"
+VERSAO = "0.5.1"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1466,7 +1466,8 @@ def conectar_banco(texto):
     except ImportError:
         sys.exit("para ler o banco instale o pyodbc (pip install pyodbc)")
     usuario, senha = pedir_login()
-    chave = lambda v: "{" + v.replace("}", "}}") + "}"  # usuário/senha com ; ou } não quebram o texto de conexão
+    # chaves {} só quando precisa: o driver ODBC da Oracle pode ler as chaves como parte da senha (ORA-01017)
+    chave = lambda v: "{" + v.replace("}", "}}") + "}" if re.search(r"[;{}]|^\s|\s$", v) else v
     try:
         con = pyodbc.connect(f"{texto.strip().rstrip(';')};UID={chave(usuario)};PWD={chave(senha)}",
                              autocommit=False, readonly=True, timeout=30)
