@@ -25,7 +25,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.1"
+VERSAO = "0.5.2"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1417,6 +1417,7 @@ def extrair(con, consultas, data_base, destino):
     cur, out = con.cursor(), {}
     for nome, sql in consultas.items():
         limpo = checar_sql(sql)
+        print(f"lendo {nome}...", flush=True)
         cur.execute(PARAMETROS_SQL.sub("?", limpo), [valores[p] for p in PARAMETROS_SQL.findall(limpo)])
         cab = [c[0].strip().lower() for c in cur.description]
         falta = COLUNAS_OBRIGATORIAS.get(nome, set()) - set(cab)
@@ -1428,6 +1429,9 @@ def extrair(con, consultas, data_base, destino):
             while lote := cur.fetchmany(10000):  # linha a linha em lotes: saldos_diarios pode ter milhões
                 w.writerows([_celula(v) for v in l] for l in lote)
                 n += len(lote)
+                if n % 500000 == 0:
+                    print(f"  {nome}: {n} linhas", flush=True)
+        print(f"  {nome}: {n} linhas, pronto", flush=True)
         out[nome] = n
     return out
 
