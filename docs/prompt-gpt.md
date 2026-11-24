@@ -53,6 +53,14 @@ Para cada consulta, dê também uma checagem que imprima só OK/FALHOU, nunca o 
 - soma do saldo do último dia útil antes da :data_base no saldos_diarios até 1% diferente da soma de operacoes.csv (a diferença normal é de juros e movimentos de um dia);
 - nenhuma linha com fonte, programa, finalidade, recursos, beneficiario ou linha fora dos valores aceitos;
 - quantas operações mudaram de programa, finalidade ou linha ao longo do período (só a contagem).
+
+Renegociações (linha):
+- linha = res_5330 nas operações de composição de dívidas rurais da MP 1.376/2026 (Resoluções CMN 5.330 e 5.340; as duas vão para os mesmos códigos do Documento 6); cpr_5330 nas CPR adquiridas pelo art. 6º da Res. 5.330.
+- linha = res_5247 (Poupança), res_5247_i ou res_5247_ii_iii (LCA) nas operações para liquidar dívidas de produtores atingidos por eventos adversos da MP 1.314/2025 (Res. CMN 5.247), conforme o inciso do art. 2º.
+- Se não houver campo que identifique essas renegociações, diga isso e pergunte qual campo usar, com a sua recomendação.
+Checagens extras (OK/FALHOU ou contagem):
+- toda operação com res_5247 na Poupança: a fonte da operação liquidada era Poupança Rural Livre ou Poupança Rural Controlados - Subvenção Econômica em 22/09/2025 (use o histórico diário de fonte) e a operação nova está em Poupança Rural Livre em todos os dias (MCR 6-8-33); dê só a contagem das que não cumprem;
+- toda operação com res_5247_i ou res_5247_ii_iii está em LCA - Taxa Livre em todos os dias (MCR 6-8-34); só a contagem das que não cumprem.
 Se faltar um mapeamento (por exemplo, de origem ou linha de crédito para programa, finalidade ou linha), pergunte em lista numerada com a sua recomendação.
 
 <TABELAS>
