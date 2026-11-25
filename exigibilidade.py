@@ -25,7 +25,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.2"
+VERSAO = "0.5.3"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1410,15 +1410,21 @@ def _celula(v):
     return v.isoformat() if isinstance(v, date) else str(v)
 
 
-def extrair(con, consultas, data_base, destino):
-    """Roda cada consulta (DB-API, parâmetros ?) e grava destino/<nome>.csv. Devolve {nome: linhas}."""
+def _executar(cur, sql, data_base, fora="{}"):
+    """Executa a consulta de leitura (DB-API, parâmetros ?), opcionalmente dentro de outra: fora = "... {} ..."."""
     s0 = safra_de(data_base.strftime("%Y-%m"))
     valores = {"data_base": data_base, "inicio_safra": date(s0, 7, 1), "inicio_anterior": date(s0 - 1, 7, 1)}
+    limpo = checar_sql(sql)
+    cur.execute(fora.format(PARAMETROS_SQL.sub("?", limpo)), [valores[p] for p in PARAMETROS_SQL.findall(limpo)])
+    return cur
+
+
+def extrair(con, consultas, data_base, destino):
+    """Roda cada consulta e grava destino/<nome>.csv. Devolve {nome: linhas}."""
     cur, out = con.cursor(), {}
     for nome, sql in consultas.items():
-        limpo = checar_sql(sql)
         print(f"lendo {nome}...", flush=True)
-        cur.execute(PARAMETROS_SQL.sub("?", limpo), [valores[p] for p in PARAMETROS_SQL.findall(limpo)])
+        _executar(cur, sql, data_base)
         cab = [c[0].strip().lower() for c in cur.description]
         falta = COLUNAS_OBRIGATORIAS.get(nome, set()) - set(cab)
         if falta:
@@ -1490,6 +1496,39 @@ def ler_config_banco(caminho):
     consultas = {s: cp[s]["sql"].strip() for s in cp.sections() if s != "conexao" and cp[s].get("sql", "").strip()
                  and not cp[s]["sql"].strip().startswith("PREENCHER")}
     return texto, consultas
+
+
+def contar(con, sql, data_base):
+    """Conta no banco, sem baixar os dados, o que a consulta do saldos_diarios devolve (só números)."""
+    cur = con.cursor()
+    colunas = [c[0].strip().lower() for c in _executar(cur, sql, data_base, "SELECT * FROM ({}) q WHERE 1 = 0").description]
+    cur.fetchall()
+    total, ids, dias, zero = _executar(cur, sql, data_base, "SELECT COUNT(*), COUNT(DISTINCT id), COUNT(DISTINCT data), "
+                                       "SUM(CASE WHEN saldo = 0 THEN 1 ELSE 0 END) FROM ({}) q").fetchone()
+    pares, extra = _executar(cur, sql, data_base, "SELECT COUNT(*), SUM(n - 1) FROM (SELECT COUNT(*) AS n FROM ({}) q "
+                             "GROUP BY id, data HAVING COUNT(*) > 1) d").fetchone()
+    return {"colunas": colunas, "linhas": total, "ids": ids, "dias": dias, "saldo_zero": zero or 0,
+            "pares_duplicados": pares, "linhas_duplicadas": extra or 0}
+
+
+def cmd_conferir(data_base):
+    texto, consultas = ler_config_banco(CONFIG_BANCO)
+    if "saldos_diarios" not in consultas:
+        sys.exit(f"preencha [saldos_diarios] em {CONFIG_BANCO}")
+    checar_sql(consultas["saldos_diarios"])
+    con = conectar_banco(texto)
+    print("contando saldos_diarios no banco (não baixa os dados)...", flush=True)
+    try:
+        r = contar(con, consultas["saldos_diarios"], dt(data_base))
+    finally:
+        con.rollback()
+        con.close()
+    print(f"colunas ({len(r['colunas'])}): {', '.join(r['colunas'])}")
+    print(f"linhas: {r['linhas']}\nids distintos: {r['ids']}\ndias distintos: {r['dias']}")
+    print(f"máximo esperado (ids x dias): {r['ids'] * r['dias']}")
+    print(f"linhas com saldo zero: {r['saldo_zero']} (o ideal é 0: dia sem linha já conta zero)")
+    print(f"linhas duplicadas por id e data: {r['linhas_duplicadas']} (o ideal é 0)")
+    return r
 
 
 def cmd_extrair(data_base):
@@ -1996,6 +2035,12 @@ def autoteste():
         lido = list(ler(Path(tmp) / "parcelas.csv"))
     check("extração grava o CSV com as colunas da consulta e usa a data-base como parâmetro",
           ok_ext == {"parcelas": 1} and lido == [{"id": "A", "data": "2026-11-03", "valor": "7.0"}])
+    con.execute("create table u as select * from t")
+    con.execute("insert into u values ('A', '2026-11-03', 0), ('B', '2026-11-04', 1)")
+    cnt = contar(con, "SELECT cod AS id, dia AS data, valor AS saldo FROM u WHERE dia >= :data_base", date(2026, 11, 2))
+    check("conferência conta linhas, ids, dias, saldo zero e duplicadas sem baixar os dados",
+          cnt == {"colunas": ["id", "data", "saldo"], "linhas": 3, "ids": 2, "dias": 2, "saldo_zero": 1,
+                  "pares_duplicados": 1, "linhas_duplicadas": 1})
     recusa = []
     for sql in ("DELETE FROM t", "SELECT 1 FROM t; DROP TABLE t", "UPDATE t SET valor = 0", "select 1 -- ok\n; delete from t"):
         try:
@@ -2018,7 +2063,8 @@ def autoteste():
 
 def menu():
     print(f"\nExigibilidade v{VERSAO}\n  1 autoteste\n  2 exemplo (dados inventados)\n  3 rodar com as entradas reais\n"
-          "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)\n  6 extrair do banco do trabalho")
+          "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)\n  6 extrair do banco do trabalho\n"
+          "  7 conferir o tamanho do saldos_diarios no banco (só contagens)")
     e = input("Número: ").strip()
     if e == "1":
         return ["autoteste"]
@@ -2034,6 +2080,8 @@ def menu():
                 "--mascarar", input("Nomes a esconder, separados por vírgula (Enter = nenhum): ").strip()]
     if e == "6":
         return ["extrair", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
+    if e == "7":
+        return ["conferir", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
     sys.exit("opção inválida")
 
 
@@ -2056,6 +2104,8 @@ def main(argv=None):
     s.add_argument("--mes")
     s = sub.add_parser("extrair")
     s.add_argument("--data-base", required=True)
+    s = sub.add_parser("conferir")
+    s.add_argument("--data-base", required=True)
     s = sub.add_parser("estrutura")
     s.add_argument("caminhos", nargs="+")
     s.add_argument("--mascarar", default="")
@@ -2077,6 +2127,8 @@ def main(argv=None):
         cmd_comparar(a.a, a.b, a.mes)
     elif a.cmd == "extrair":
         cmd_extrair(a.data_base)
+    elif a.cmd == "conferir":
+        cmd_conferir(a.data_base)
     elif a.cmd == "estrutura":
         cmd_estrutura(a.caminhos, a.mascarar)
     return 0
