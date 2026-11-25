@@ -21,11 +21,11 @@ import csv
 import json
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.5"
+VERSAO = "0.5.6"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -677,7 +677,8 @@ def ler_classificacao(r, onde, data_padrao=None):
             sys.exit(f"{onde}: código {informado} não é código de aplicação do anexo da fonte {fonte}")
         return informado, "informado" if informado == regra else f"informado (regra daria {regra or 'sem código'})"
     if not regra:
-        return "", "sem código no Documento 6"
+        return "", "sem código no Documento 6: " + "/".join(op[k] or "-" for k in
+                                                           ("fonte", "programa", "finalidade", "recursos", "beneficiario", "linha"))
     return regra, "regra" if len(emp) == 1 else f"regra empatada com {', '.join(emp[1:])}"
 
 
@@ -773,7 +774,7 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
     """
     ini = date(safra_de(data_base.strftime("%Y-%m")), 7, 1)
     cache, acc = {}, {}  # acc[(id, mes)] = [soma, nota, código, último dia com linha, contratação, soma por código]
-    fora, sem = 0, set()
+    fora, sem = 0, defaultdict(set)
     chave = ("fonte", "programa", "finalidade", "recursos", "beneficiario", "linha", "data_contratacao", "taxa_aa", "codigo")
     for n, r in enumerate(linhas, start=2):
         d = dt(r["data"])
@@ -796,7 +797,7 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
         if nota > a[1]:
             a[1:3] = nota, cache[c][0]
             if cache[c][1].startswith("sem código"):
-                sem.add(k[0])
+                sem[cache[c][1].split(": ")[1]].add(k[0])
     du, d15, dfim, hist, no_mes = {}, {}, {}, {}, set()
     for (i, m), (soma, _, cod, ultimo, dc, por_cod) in sorted(acc.items(), key=lambda x: x[0][1]):
         if m not in du:
@@ -821,7 +822,9 @@ def realizado_diario(linhas, data_base, feriados=frozenset()):
     if no_mes:
         avisos.append(f"saldos_diarios: {len(no_mes)} operações contratadas e encerradas no mesmo mês ficaram fora (ADR 0006)")
     if sem:
-        avisos.append(f"saldos_diarios: {len(sem)} operações sem código no Documento 6 em algum mês (não contam)")
+        avisos.append(f"saldos_diarios: {len(set().union(*sem.values()))} operações sem código no Documento 6 em algum mês "
+                      f"(não contam). Fonte/programa/finalidade/recursos/beneficiário/linha: "
+                      + "; ".join(f"{c} ({len(v)})" for c, v in sorted(sem.items(), key=lambda x: -len(x[1]))))
     return hist, avisos
 
 
@@ -1085,9 +1088,11 @@ def montar(pasta, data_base, tipo_if="banco"):
         avisos.append("parametros.json: liberação menor que R$ 1.000; desde a v0.4.0 o valor é em reais, não em milhões")
     for motivo, txt in (("sem código", "sem código no Documento 6 (não contam)"), ("empatada", "com regra empatada"),
                         ("regra daria", "com código informado diferente da regra")):
-        n = sum(1 for c in classif if motivo in c[4])
+        n = Counter(c[4].split(": ")[-1] for c in classif if motivo in c[4])
         if n:
-            avisos.append(f"{n} operações {txt}: ver classificacao.csv")
+            extra = (". Fonte/programa/finalidade/recursos/beneficiário/linha: " + "; ".join(f"{c} ({q})" for c, q in
+                     n.most_common())) if motivo == "sem código" else ""
+            avisos.append(f"{sum(n.values())} operações {txt}{extra}: ver classificacao.csv")
     com_saldo = {k[1] for k in hist}
     sem_real = [m for m in meses_h if m < mes_base and m not in com_saldo]
     if sem_real:

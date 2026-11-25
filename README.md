@@ -71,7 +71,7 @@ CSV, TXT (separador `;` `,` tab ou `|`) ou XLSX (1ª aba). Número com vírgula 
 ## Saídas de cada rodada
 
 - `diretores.html` e `operacional.html` (acima).
-- `classificacao.csv`: código de cada operação, se a instituição informa ou o Sisex calcula, e o motivo (`regra`, `informado`, `informado (regra daria X)`, `sem código no Documento 6`, `livre`).
+- `classificacao.csv`: código de cada operação, se a instituição informa ou o Sisex calcula, e o motivo (`regra`, `informado`, `informado (regra daria X)`, `sem código no Documento 6: fonte/programa/finalidade/recursos/beneficiário/linha`, `livre`).
 - `codigos.csv`: todos os códigos com valor, posição a posição: aplicações, ponderadores (seção 4), exigibilidade, limites, deficiência e excesso. Cada um marcado `informado` ou `calculado`, com `calculado`, `oficial` e `diferenca` nas posições que vieram no arquivo `oficial`. Código que só existe num dos lados aparece com o outro em zero.
 - `exigibilidade.csv`, `aplicacoes.csv`, `saldo_operacoes.csv`.
 
