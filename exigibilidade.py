@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.7"
+VERSAO = "0.5.8"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1516,6 +1516,48 @@ def contar(con, sql, data_base):
             "pares_duplicados": pares, "linhas_duplicadas": extra or 0}
 
 
+CLASSIFICACAO_COLS = ("fonte", "programa", "finalidade", "recursos", "beneficiario", "linha")
+
+
+def _com_original(sql, col):
+    """Acrescenta ao SELECT o campo do banco que o CASE ... END AS col traduz, como orig_<col>. None se não achar."""
+    m = re.search(rf"(?i)\bEND\s+(?:AS\s+)?{col}\b", sql)
+    if not m:
+        return None
+    nivel, i = 0, None
+    for t in reversed(list(re.finditer(r"(?i)\b(CASE|END)\b", sql[:m.start() + 3]))):
+        nivel += 1 if t.group(1).upper() == "END" else -1
+        if nivel == 0:
+            i = t.start()
+            break
+    if i is None:
+        return None
+    caso = sql[i:m.start() + 3]
+    e = (re.match(r"(?is)CASE\s+WHEN\s+(.+?)\s*(?:=|<>|!=|>|<|\bIN\b|\bLIKE\b|\bIS\b|\bBETWEEN\b)", caso)
+         or re.match(r"(?is)CASE\s+(.+?)\s+WHEN\b", caso))
+    return sql[:m.end()] + f", {e.group(1).strip()} AS orig_{col}" + sql[m.end():] if e else None
+
+
+def distribuicao(con, sql, data_base):
+    """Quantas linhas por valor de cada coluna de classificação e, onde ela sai vazia, por valor do campo original."""
+    cur, out = con.cursor(), {}
+    cols = [c[0].strip().lower() for c in _executar(cur, sql, data_base, "SELECT * FROM ({}) q WHERE 1 = 0").description]
+    cur.fetchall()
+    for col in (c for c in CLASSIFICACAO_COLS if c in cols):
+        out[col] = _executar(cur, sql, data_base, f"SELECT {col}, COUNT(*) FROM ({{}}) q GROUP BY {col} "
+                             "ORDER BY 2 DESC").fetchall()
+        com = sql if f"orig_{col}" in cols else _com_original(sql, col)
+        if not com:
+            continue
+        try:
+            out[f"{col} vazia, pelo campo original"] = _executar(
+                cur, com, data_base, f"SELECT orig_{col}, COUNT(*) FROM ({{}}) q WHERE {col} IS NULL OR {col} = '' "
+                f"GROUP BY orig_{col} ORDER BY 2 DESC").fetchall()
+        except Exception:  # CASE em formato que não reconheço: fica só a contagem da coluna
+            con.rollback()
+    return out
+
+
 def cmd_conferir(data_base):
     texto, consultas = ler_config_banco(CONFIG_BANCO)
     if "saldos_diarios" not in consultas:
@@ -1525,6 +1567,9 @@ def cmd_conferir(data_base):
     print("contando saldos_diarios no banco (não baixa os dados)...", flush=True)
     try:
         r = contar(con, consultas["saldos_diarios"], dt(data_base))
+        if "operacoes" in consultas:
+            print("contando a classificação do operacoes no banco...", flush=True)
+            dist = distribuicao(con, consultas["operacoes"], dt(data_base))
     finally:
         con.rollback()
         con.close()
@@ -1533,6 +1578,9 @@ def cmd_conferir(data_base):
     print(f"máximo esperado (ids x dias): {r['ids'] * r['dias']}")
     print(f"linhas com saldo zero: {r['saldo_zero']} (o ideal é 0: dia sem linha já conta zero)")
     print(f"linhas duplicadas por id e data: {r['linhas_duplicadas']} (o ideal é 0)")
+    for col, linhas in (dist if "operacoes" in consultas else {}).items():
+        print(f"\noperacoes, {col}: " + "; ".join(f"{'(vazio)' if v in (None, '') else str(v).strip()} = {n}"
+                                                  for v, n in linhas[:40]))
     return r
 
 
@@ -2047,6 +2095,11 @@ def autoteste():
     con.execute("create table u as select * from t")
     con.execute("insert into u values ('A', '2026-11-03', 0), ('B', '2026-11-04', 1)")
     cnt = contar(con, "SELECT cod AS id, dia AS data, valor AS saldo FROM u WHERE dia >= :data_base", date(2026, 11, 2))
+    sql_op = ("SELECT cod AS id, CASE WHEN dia < '2026-11-04' THEN 'custeio' END AS finalidade, "
+              "'controlados' AS recursos FROM u")
+    dist = distribuicao(con, sql_op, date(2026, 11, 2))
+    check("conferência mostra a classificação e, onde a finalidade sai vazia, o campo original do CASE",
+          dist["recursos"] == [("controlados", 4)] and dist["finalidade vazia, pelo campo original"] == [("2026-11-04", 1)])
     check("conferência conta linhas, ids, dias, saldo zero e duplicadas sem baixar os dados",
           cnt == {"colunas": ["id", "data", "saldo"], "linhas": 3, "ids": 2, "dias": 2, "saldo_zero": 1,
                   "pares_duplicados": 1, "linhas_duplicadas": 1})
@@ -2073,7 +2126,7 @@ def autoteste():
 def menu():
     print(f"\nExigibilidade v{VERSAO}\n  1 autoteste\n  2 exemplo (dados inventados)\n  3 rodar com as entradas reais\n"
           "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)\n  6 extrair do banco do trabalho\n"
-          "  7 conferir o tamanho do saldos_diarios no banco (só contagens)")
+          "  7 conferir no banco: tamanho do saldos_diarios e classificação do operacoes (só contagens)")
     e = input("Número: ").strip()
     if e == "1":
         return ["autoteste"]
