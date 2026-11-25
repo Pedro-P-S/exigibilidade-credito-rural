@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.6"
+VERSAO = "0.5.7"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -80,17 +80,17 @@ REGRAS_TXT = """\
 3.1.13.33-4;i;pronaf;pronaf;custeio;2022-07-01;2023-06-30;5;;;produtor;;1.57;4.1.34.14-7;Operações de custeio contratadas de 1/7/2022 a 30/6/2023 com taxa de até 5% a.a. - Res. nº 5.028/2022.
 3.1.13.34-1;i;pronaf;pronaf;custeio;2022-07-01;2023-06-30;6;;;produtor;;1.38;4.1.34.15-4;Operações de custeio contratadas de 1/7/2022 a 30/6/2023 com taxa de até 6% a.a. - Res. nº 5.028/2022.
 3.1.13.35-8;i;pronaf;pronaf;custeio;2022-07-01;2023-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2022 a 30/6/2023.
-3.1.13.36-5;i;3.1.13.48-2;pronaf;industrializacao;2022-07-01;2023-06-30;;;;produtor;;;;Operações de industrialização - contratadas de 1/7/2022 a 30/6/2023.
+3.1.13.36-5;i;3.1.13.48-2;pronaf;industrializacao;2022-07-01;2023-06-30;;;;;;;;Operações de industrialização - contratadas de 1/7/2022 a 30/6/2023.
 3.1.13.37-2;i;pronaf;pronaf;custeio;2023-07-01;2024-06-30;4;;;produtor;;1.26;4.1.34.16-1;Operações de custeio - contratadas de 1/7/2023 a 30/6/2024 com taxa de até 4% a.a. - Res. n° 5.087/2023.
 3.1.13.38-9;i;pronaf;pronaf;custeio;2023-07-01;2024-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2023 a 30/6/2024.
-3.1.13.39-6;i;3.1.13.48-2;pronaf;industrializacao;2023-07-01;2024-06-30;;;;produtor;;;;Operações de industrialização - contratadas de 1/7/2023 a 30/6/2024.
+3.1.13.39-6;i;3.1.13.48-2;pronaf;industrializacao;2023-07-01;2024-06-30;;;;;;;;Operações de industrialização - contratadas de 1/7/2023 a 30/6/2024.
 3.1.13.40-6;i;pronaf;pronaf;custeio;2024-07-01;2025-06-30;3;;;produtor;;1.37;4.1.34.17-8;Operações de custeio - contratadas de 1/7/2024 a 30/6/2025 com taxa de até 3% a.a. - Res. n° 5.170/2024.
 3.1.13.41-3;i;pronaf;pronaf;custeio;2024-07-01;2025-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2024 a 30/6/2025.
-3.1.13.42-0;i;3.1.13.48-2;pronaf;industrializacao;2024-07-01;2025-06-30;;;;produtor;;;;Operações de industrialização - contratadas de 1/7/2024 a 30/6/2025.
+3.1.13.42-0;i;3.1.13.48-2;pronaf;industrializacao;2024-07-01;2025-06-30;;;;;;;;Operações de industrialização - contratadas de 1/7/2024 a 30/6/2025.
 3.1.13.43-7;c;pronaf;pronaf;custeio;2025-07-01;2026-06-30;3;;;produtor;;1.37;4.1.34.18-5;Operações de custeio contratadas de 1/7/2025 a 30/6/2026 com taxa de até 3% a.a. - Res. n° 5.170/2024.
 3.1.13.44-4;c;pronaf;pronaf;custeio;2025-07-01;2026-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2025 a 30/6/2026.
-3.1.13.46-8;c;3.1.13.48-2;pronaf;industrializacao;2026-07-01;2027-06-30;;;;produtor;;;;Operações de industrialização - MCR 10-11 - contratadas de 1/7/2026 a 30/6/2027.
-3.1.13.47-5;c;3.1.13.48-2;pronaf;comercializacao;2026-07-01;2027-06-30;;;;produtor;;;;Operações de comercialização - MCR 10-11 - contratadas de 1/7/2026 a 30/6/2027.
+3.1.13.46-8;c;3.1.13.48-2;pronaf;industrializacao;2026-07-01;2027-06-30;;;;;;;;Operações de industrialização - MCR 10-11 - contratadas de 1/7/2026 a 30/6/2027.
+3.1.13.47-5;c;3.1.13.48-2;pronaf;comercializacao;2026-07-01;2027-06-30;;;;;;;;Operações de comercialização - MCR 10-11 - contratadas de 1/7/2026 a 30/6/2027.
 3.1.13.49-9;c;pronaf;pronaf;custeio;2026-07-01;2027-06-30;3;;;produtor;;1.37;4.1.34.19-2;Operações de custeio contratadas de 1/7/2026 a 30/6/2027 com taxa de até 3% a.a. - Res. nº 5.170/2024.
 3.1.13.50-9;c;pronaf;pronaf;custeio;2026-07-01;2027-06-30;;;;produtor;;;;Operações de custeio - Demais operações - contratadas de 1/7/2026 a 30/6/2027.
 3.1.10.51-9;i;pronaf;pronaf;;;;;;;produtor;proagro;;;Proagro - Ressarcimentos pendentes vinculados ao Pronaf (MCR 6-2).
@@ -1988,6 +1988,9 @@ def autoteste():
           and CODIGOS["3.1.30.45-8"]["tipo"] == "i")
     check("Pronaf investimento 2026/27 não tem código no Anexo II",
           cl(programa="pronaf", finalidade="investimento", data_contratacao="2026-08-01") == "")
+    check("Pronaf industrialização de cooperativa da agricultura familiar -> 3.1.13.46-8 (MCR 10-11-1-a e 10-6-4-a-III)",
+          cl(programa="pronaf", finalidade="industrializacao", beneficiario="cooperativa",
+             data_contratacao="2026-08-01") == "3.1.13.46-8")
     check("Pronamp investimento entra no limite 3.1.41.39-9",
           CODIGOS[cl(programa="pronamp", finalidade="investimento", data_contratacao="2026-09-01")]["cat"] == "3.1.41.39-9")
     check("Poupança custeio não controlado 2026/27 -> 3.2.12.18-7; LCA CPR 2026/27 -> 3.3.30.76-0 (faculdade)",
