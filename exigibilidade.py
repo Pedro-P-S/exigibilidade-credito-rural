@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.8"
+VERSAO = "0.5.9"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1539,7 +1539,7 @@ def _com_original(sql, col):
 
 
 def distribuicao(con, sql, data_base):
-    """Quantas linhas por valor de cada coluna de classificação e, onde ela sai vazia, por valor do campo original."""
+    """Quantas linhas por valor de cada coluna de classificação e por par (valor, campo original que o CASE traduz)."""
     cur, out = con.cursor(), {}
     cols = [c[0].strip().lower() for c in _executar(cur, sql, data_base, "SELECT * FROM ({}) q WHERE 1 = 0").description]
     cur.fetchall()
@@ -1550,9 +1550,9 @@ def distribuicao(con, sql, data_base):
         if not com:
             continue
         try:
-            out[f"{col} vazia, pelo campo original"] = _executar(
-                cur, com, data_base, f"SELECT orig_{col}, COUNT(*) FROM ({{}}) q WHERE {col} IS NULL OR {col} = '' "
-                f"GROUP BY orig_{col} ORDER BY 2 DESC").fetchall()
+            out[f"{col} <- campo original"] = [(f"{a or '(vazio)'} <- {b}", n) for a, b, n in _executar(
+                cur, com, data_base, f"SELECT {col}, orig_{col}, COUNT(*) FROM ({{}}) q "
+                f"GROUP BY {col}, orig_{col} ORDER BY 1, 3 DESC").fetchall()]
         except Exception:  # CASE em formato que não reconheço: fica só a contagem da coluna
             con.rollback()
     return out
@@ -1574,13 +1574,13 @@ def cmd_conferir(data_base):
         con.rollback()
         con.close()
     print(f"colunas ({len(r['colunas'])}): {', '.join(r['colunas'])}")
-    print(f"linhas: {r['linhas']}\nids distintos: {r['ids']}\ndias distintos: {r['dias']}")
-    print(f"máximo esperado (ids x dias): {r['ids'] * r['dias']}")
-    print(f"linhas com saldo zero: {r['saldo_zero']} (o ideal é 0: dia sem linha já conta zero)")
-    print(f"linhas duplicadas por id e data: {r['linhas_duplicadas']} (o ideal é 0)")
+    print(f"linhas: {r['linhas']:.0f}\nids distintos: {r['ids']:.0f}\ndias distintos: {r['dias']:.0f}")
+    print(f"máximo esperado (ids x dias): {r['ids'] * r['dias']:.0f}")
+    print(f"linhas com saldo zero: {r['saldo_zero']:.0f} (o ideal é 0: dia sem linha já conta zero)")
+    print(f"linhas duplicadas por id e data: {r['linhas_duplicadas']:.0f} (o ideal é 0)")
     for col, linhas in (dist if "operacoes" in consultas else {}).items():
-        print(f"\noperacoes, {col}: " + "; ".join(f"{'(vazio)' if v in (None, '') else str(v).strip()} = {n}"
-                                                  for v, n in linhas[:40]))
+        print(f"\noperacoes, {col}: " + "; ".join(f"{'(vazio)' if v in (None, '') else str(v).strip()} = {int(n)}"
+                                                  for v, n in linhas[:80]))
     return r
 
 
@@ -2099,7 +2099,7 @@ def autoteste():
               "'controlados' AS recursos FROM u")
     dist = distribuicao(con, sql_op, date(2026, 11, 2))
     check("conferência mostra a classificação e, onde a finalidade sai vazia, o campo original do CASE",
-          dist["recursos"] == [("controlados", 4)] and dist["finalidade vazia, pelo campo original"] == [("2026-11-04", 1)])
+          dist["recursos"] == [("controlados", 4)] and dist["finalidade <- campo original"][0] == ("(vazio) <- 2026-11-04", 1))
     check("conferência conta linhas, ids, dias, saldo zero e duplicadas sem baixar os dados",
           cnt == {"colunas": ["id", "data", "saldo"], "linhas": 3, "ids": 2, "dias": 2, "saldo_zero": 1,
                   "pares_duplicados": 1, "linhas_duplicadas": 1})
