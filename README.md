@@ -46,8 +46,8 @@ CSV, TXT (separador `;` `,` tab ou `|`) ou XLSX (1ª aba). Número com vírgula 
 | `liberacoes` | não | `id`, `data`, `valor`; para operação nova também `taxa_aa` e a classificação (`data_contratacao` vazia = data da liberação) | liberação futura que vem da base |
 | `saldos_diarios` | não (sem ele os meses passados ficam zero) | `id`, `data`, `saldo` e as colunas de classificação daquele dia | operação e dia útil, de 1º de julho do ano-safra até o dia útil antes da data-base. É daqui que sai o realizado: saldo médio do mês = soma dos dias úteis ÷ dias úteis, dia útil sem linha = zero (Doc 6, Anexo I, 4.6-b); código do mês = regra na linha do último dia útil até o dia 15 (Anexo I, 12.2-b) |
 | `oficial` | não | `posicao`, `codigo`, `valor` (o valor do código na posição, como está no Sisex) | posição e código |
-| `vsr` | sim | `mes` (ou `data`), `vsr_avista`, `vsr_poupanca` | apuração do VSR (realizada ou projetada) |
-| `lca` | sim | `data` (saldo diário) ou `mes` (saldo médio do mês projetado), `saldo` | dia ou mês |
+| `vsr` | não (sem ele a exigibilidade fica zero e o programa avisa) | `mes` (ou `data`), `vsr_avista`, `vsr_poupanca` | apuração do VSR (realizada ou projetada) |
+| `lca` | não (sem ele a exigibilidade da LCA fica zero e o programa avisa) | `data` (saldo diário) ou `mes` (saldo médio do mês projetado), `saldo` | dia ou mês |
 | `dir` | não | `mes`, `modalidade`, `captacao`, `aplicacao` (saldo médio do mês) | mês e modalidade |
 | `cenario` | não | `tipo` (`liquidacao` ou `reclassificacao`), `id`, `data`, `codigo` (novo código; vazio = sai da exigibilidade) | ajuste numa operação |
 | `feriados` | não | `data` | feriado (dia útil = segunda a sexta fora dos feriados) |

@@ -25,7 +25,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.4"
+VERSAO = "0.5.5"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -854,10 +854,10 @@ def carregar_entradas(pasta, data_base, feriados):
     sd = achar(p, "saldos_diarios")
     hist, avisos = realizado_diario(ler(sd), data_base, feriados) if sd else ({}, [])
     vsr = defaultdict(list)
-    for r in ler(achar(p, "vsr", True)):
+    for r in (ler(achar(p, "vsr")) if achar(p, "vsr") else []):
         vsr[mes_da_linha(r)].append((num(r.get("vsr_avista")), num(r.get("vsr_poupanca"))))
     lca = defaultdict(lambda: [0.0, 0])  # mes -> [soma, peso]
-    for r in ler(achar(p, "lca", True)):
+    for r in (ler(achar(p, "lca")) if achar(p, "lca") else []):
         m = mes_da_linha(r)
         peso = 1 if r.get("data") else dias_uteis(m, feriados)  # linha diária pesa 1; mensal pesa os dias úteis
         lca[m][0] += num(r.get("saldo")) * peso
@@ -1349,7 +1349,7 @@ MODELO_CONFIG = """\
 #    Renomeie as colunas com AS para os nomes do README (ex.: t.NUMERO AS id). Termine sem ponto e vírgula.
 # 3. Parâmetros que o programa preenche: :data_base, :inicio_safra (1º de julho do ano-safra da data-base) e
 #    :inicio_anterior (1º de julho do ano-safra anterior).
-# 4. Arquivo que não vai usar: deixe "sql = PREENCHER". Obrigatórios: operacoes, parcelas, vsr, lca.
+# 4. Arquivo que não vai usar: deixe "sql = PREENCHER". Obrigatórios: operacoes e parcelas.
 
 [conexao]
 # ex.: DRIVER={Nome do driver Oracle};DBQ=servidor:porta/servico   ou   DSN=nome_da_fonte_odbc
@@ -1554,7 +1554,8 @@ def cmd_extrair(data_base):
         con.close()
     for nome in sorted(set(n) | {"operacoes", "parcelas", "vsr", "lca"}):
         print(f"CHECK {nome}: {n.get(nome, 0)} linhas {'OK' if n.get(nome) else 'FALHOU'}")
-    print(f"\nEntradas em {destino}. Ponha lá o oficial.csv e o parametros.json, se tiver, e rode o menu 3.")
+    print(f"\nEntradas em {destino}.\nPróximo passo: menu 3 e Enter (usa esta pasta). Opcionais nesta pasta: oficial.csv "
+          "(valores do Sisex, para comparar) e parametros.json (gerado pelo botão do HTML).")
     return destino
 
 
@@ -2071,8 +2072,14 @@ def menu():
     if e == "2":
         return ["exemplo"]
     if e == "3":
-        return ["rodar", input("Pasta das entradas: ").strip().strip('"'), "--data-base",
-                input("Data-base AAAA-MM-DD: ").strip()]
+        pasta = input("Pasta das entradas (Enter = a última extraída do banco): ").strip().strip('"')
+        if not pasta:
+            ext = sorted((PASTA_SCRIPT / "entradas").glob("????-??-??"))
+            if not ext:
+                sys.exit("não achei pasta em entradas: rode antes o menu 6 ou digite a pasta")
+            print(f"usando {ext[-1]} (data-base {ext[-1].name})")
+            return ["rodar", str(ext[-1]), "--data-base", ext[-1].name]
+        return ["rodar", pasta, "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
     if e == "4":
         return ["comparar", input("Pasta da rodada A: ").strip().strip('"'), input("Pasta da rodada B: ").strip().strip('"')]
     if e == "5":
