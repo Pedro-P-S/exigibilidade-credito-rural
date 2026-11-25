@@ -25,7 +25,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.3"
+VERSAO = "0.5.4"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1407,7 +1407,7 @@ def _celula(v):
         return ""
     if isinstance(v, datetime):
         return v.date().isoformat()
-    return v.isoformat() if isinstance(v, date) else str(v)
+    return v.isoformat() if isinstance(v, date) else str(v).strip()  # coluna CHAR do Oracle vem com espaços até o tamanho
 
 
 def _executar(cur, sql, data_base, fora="{}"):
