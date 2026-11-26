@@ -74,7 +74,7 @@ CSV, TXT (separador `;` `,` tab ou `|`) ou XLSX (1ª aba). Número com vírgula 
 
 - `diretores.html` e `operacional.html` (acima).
 - `classificacao.csv`: código de cada operação, se a instituição informa ou o Sisex calcula, e o motivo (`regra`, `informado`, `informado (regra daria X)`, `sem código no Documento 6: fonte/programa/finalidade/recursos/beneficiário/linha`, `livre`).
-- `codigos.csv`: todos os códigos com valor, posição a posição: aplicações, ponderadores (seção 4), exigibilidade, limites, deficiência e excesso. Cada um marcado `informado` ou `calculado`, com `calculado`, `oficial` e `diferenca` nas posições que vieram no arquivo `oficial`. Código que só existe num dos lados aparece com o outro em zero.
+- `codigos.csv` (e a aba "Detalhe por código" do `operacional.html`): todos os códigos com valor, posição a posição: aplicações, partes dos totais do Anexo II (diretas, especiais com DIR, ponderadores: 3.1.10.01-4/02-1/03-8 e iguais), ponderadores (seção 4), exigibilidade, limites, deficiência e excesso. Cada um marcado `informado` ou `calculado`, com `calculado`, `oficial` e `diferenca` nas posições que vieram no arquivo `oficial`. Código que só existe num dos lados aparece com o outro em zero.
 - `exigibilidade.csv`, `aplicacoes.csv`, `saldo_operacoes.csv`.
 
 O relatório do Sisex lista as operações de cada código calculado (Doc 6, Anexo I, 12.1-e e 7.4-i), então dá para descer da diferença até a operação. O valor oficial é a posição acumulada; o saldo médio de cada mês sai da diferença entre posições seguidas, pesada pelos dias úteis (Anexo I, 4.6-c/d), e alimenta a série dos diretores (oficial nos meses passados, projeção nos futuros).

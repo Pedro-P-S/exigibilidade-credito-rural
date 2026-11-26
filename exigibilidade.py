@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.6.0"
+VERSAO = "0.6.1"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1152,6 +1152,38 @@ def com_oficial(linhas, oficial, dados):
     return linhas
 
 
+# Doc 6, Anexo II: códigos de aplicação das seções "Aplicações Especiais" (3-A-II, 3-C-II, 3-D-II); o resto é direta.
+ESPECIAIS_RO = set("""3.1.10.51-9 3.1.10.52-6 3.1.10.54-0 3.1.11.48-4 3.1.11.50-1 3.1.11.97-2 3.1.12.04-3 3.1.13.45-1
+3.1.12.08-1 3.1.30.65-4 3.1.30.54-4 3.1.30.57-5 3.1.30.58-2 3.1.30.59-9 3.1.30.61-6 3.1.30.73-3 3.1.30.75-7 3.1.30.76-4
+3.1.30.96-0 3.1.30.99-1 3.1.32.00-9 3.1.40.20-4 3.1.40.21-1 3.1.40.22-8 3.1.40.23-5 3.1.40.24-2 3.1.40.27-3 3.1.40.28-0
+3.1.40.29-7 3.1.40.33-8 3.1.40.35-2 3.1.40.36-9 3.1.40.37-6""".split())
+LIMITES_DIRETAS = {"3.1.13.48-2", "3.1.41.39-9", "3.1.30.87-4", "3.1.30.89-8"}  # limites que ficam nas seções de diretas
+# total -> (diretas, especiais, ponderadores) do Doc 6 (3.1.10.00-7 = 01-4 + 02-1 + 03-8 e igual nos outros)
+PARTES_RO = {"ap_pronaf": ("3.1.10.01-4", "3.1.10.02-1", "3.1.10.03-8", "Pronaf"),
+             "ap_pronamp": ("3.1.40.01-5", "3.1.40.02-2", "3.1.40.03-9", "Pronamp"),
+             "ap_geral": ("3.1.30.01-8", "3.1.30.03-2", "3.1.30.04-9", "Geral")}
+
+
+def partes_ro(v, apl_cod, s, m, du):
+    """Diretas, especiais e ponderadores de cada total do Anexo II. Especiais = total - diretas - ponderadores, então
+    inclui o DIR (3.1.10.50-2 e iguais, que o Doc 6 põe nas especiais) e o que vem de outra subexigibilidade."""
+    out = {}
+    for b, (cd, ce, cp, _) in PARTES_RO.items():
+        dirt = sum(v["lim_" + c] for c in LIMITES_DIRETAS if LIMITES[c][1] == b)
+        pond = 0.0
+        for c, serie in apl_cod.items():
+            r = CODIGOS[c]
+            if r["fonte"] != "RO" or balde(c) != b:
+                continue
+            val = acum(serie, s, m, du)
+            pond += val * (float(r["fator"] or 1) - 1)
+            if c not in ESPECIAIS_RO and r["cat"] not in LIMITES:
+                dirt += val
+        out[cd], out[cp] = dirt, pond
+        out[ce] = v[b] - dirt - pond
+    return out
+
+
 def linhas_codigos(dados, resultado, apl_cod):
     """Todos os códigos com valor: aplicação (média acumulada de julho até a posição, Doc 6 Anexo I 4.6-c/d),
     ponderadores (seção 4) e as linhas de exigibilidade, limite, deficiência e excesso. Oficial e diferença: com_oficial."""
@@ -1171,6 +1203,11 @@ def linhas_codigos(dados, resultado, apl_cod):
                     out.append([f"{s}/{int(s) + 1}", m, rp, r["fonte"], r["ponderador"], "calculado",
                                 f"Ponderação de {cod}: {round((float(r['fator']) - 1) * 100, 1)}% do saldo".replace(".", ","),
                                 "", round(val * (float(r["fator"]) - 1), 2), "", ""])
+            nomes = {c: f"{n}: {t}" for cd, ce, cp, n in PARTES_RO.values()
+                     for c, t in ((cd, "aplicações diretas"), (ce, "aplicações especiais, com DIR (total menos diretas "
+                                  "e ponderadores)"), (cp, "acréscimo dos ponderadores"))}
+            for cod, val in partes_ro(v["RO"], apl_cod, int(s), m, dados["du"]).items():
+                out.append([f"{s}/{int(s) + 1}", m, rp, "RO", cod, "calculado", nomes[cod], "", round(val, 2), "", ""])
             for an, linhas in LINHAS.items():
                 for k, cod, desc in linhas:
                     out.append([f"{s}/{int(s) + 1}", m, rp, an, cod,
@@ -1195,6 +1232,8 @@ def cmd_rodar(pasta, data_base, tipo_if="banco", rodada=None):
             for i, fo, c, t, mo in classif])
     cods = com_oficial(linhas_codigos(dados, resultado, apl_cod), dados["oficial"], dados)
     gravar(destino / "codigos.csv", CAB_CODIGOS, cods)
+    lin = {c for ls in LINHAS.values() for _, c, _ in ls}  # esses já estão no detalhe por anexo
+    dados["codigos"] = [[l[1], l[3], l[4], l[6], l[8]] for l in cods if l[4] not in lin and l[8] != ""]
     if dados["oficial"]:
         dif = [l for l in cods if l[10] != "" and abs(l[10]) > 1]
         print(f"Oficial: {len(dif)} códigos com diferença acima de R$ 1,00 (ver codigos.csv)")
@@ -1840,7 +1879,10 @@ function render(){const R=calcular(P),s=safraSel(),apl=comParametros(D.apl,D.pag
     d+=`<h2>${nome} · ${s}/${s+1}</h2><div class="tab"><table>${cabecalho(s)}`;
     for(const [k,cod,desc] of D.linhas[an])d+=linhas(s,an,k,`<span class="cod">${cod}</span>${desc}`,cod,m=>R[s][m][an][k]??0);
     d+="</table></div>"}
-  document.getElementById("blocos").innerHTML=b;document.getElementById("detalhe").innerHTML=d+'<p class="nota">Códigos de aplicação um a um: codigos.csv da rodada.</p>'}
+  const cs={};for(const [m,an,cod,tit,v] of (D.codigos||[]))if(mesesSafra(s).includes(m)){(cs[an+"|"+cod]=cs[an+"|"+cod]||{an,cod,tit,v:{}}).v[m]=v}
+  const ks=Object.keys(cs).sort();if(ks.length){d+=`<h2>Códigos de aplicação, partes dos totais e ponderadores · ${s}/${s+1}</h2><div class="tab"><table>${cabecalho(s)}`;
+    for(const k of ks){const c=cs[k];d+=linhas(s,c.an,"",`<span class="cod">${c.cod}</span>${c.tit}`,c.cod,m=>c.v[m]??0)}d+="</table></div>"}
+  document.getElementById("blocos").innerHTML=b;document.getElementById("detalhe").innerHTML=d+'<p class="nota">Os mesmos códigos estão no codigos.csv da rodada. Esta tabela usa os parâmetros da rodada (não muda com a simulação).</p>'}
 function campo(caminho,valor){return `<input data-c="${caminho}" value="${reais(valor)}">`}
 function atualizarPct(){document.querySelectorAll('#campos input[data-c^="pct"]').forEach(e=>{const [t,x,m]=e.dataset.c.split("|");
   if(t==="pct")e.value=reais(pctDe(P,x,m));else if(t==="pct_grupo")e.value=reais(g(P,"pct_grupo",x)??P.pct_geral??80)})}
