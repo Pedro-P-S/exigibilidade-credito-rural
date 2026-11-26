@@ -85,3 +85,15 @@ Checagem: no último dia útil antes de :data_base, a soma do saldo do saldos_di
 ```
 Checagem: alguma coluna de classificação saiu com valor fora da lista que eu dei? Devolva SQL que retorne OK ou FALHOU.
 ```
+
+## 9. Comparar Sisex × programa (cole junto o Sisex e o codigos.csv)
+
+Antes deste prompt, cole no chat: (a) o texto da posição do Sisex (Ctrl+A, Ctrl+C na página) e (b) o arquivo `codigos.csv` da rodada (pasta `saidas\rodadas\...`).
+
+```
+Compare o Sisex que colei com o codigos.csv que colei, só na posição AAAA-MM (troque pelo mês) e só nos códigos que começam com 3.1.1 (Pronaf).
+No codigos.csv use a coluna "calculado" da linha com a coluna "posicao" igual ao mês.
+Para cada código que tem valor no Sisex, devolva uma linha: código; % de diferença = (Sisex - calculado) / Sisex x 100, com 0 casas; ou "não tem" se o código não aparece no codigos.csv nesse mês.
+Depois liste os códigos que têm valor no codigos.csv e não aparecem no Sisex, com "só no programa".
+Responda só a lista, sem valores em reais, sem explicação.
+```
