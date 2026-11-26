@@ -30,7 +30,7 @@ Responda só "ok".
 ```
 SQL do arquivo operacoes: uma linha por operação com saldo em :data_base.
 Colunas: id, saldo, taxa_aa (% a.a.), fonte (RO, POUP, LCA ou LIVRE), programa (pronaf, pronamp, demais), finalidade (custeio, investimento, comercializacao, industrializacao), data_contratacao, recursos (controlados, nao_controlados), beneficiario (produtor, cooperativa, cooperativa_cooperados, cooperativa_servicos), linha (vazio na operação comum).
-Converta os valores do banco para esses textos com CASE.
+Converta os valores do banco para esses textos com CASE. Finalidade no padrão do Bacen: 1 = comercializacao, 2 = custeio, 3 = investimento, 4 = industrializacao.
 ```
 
 ## 3. saldos_diarios

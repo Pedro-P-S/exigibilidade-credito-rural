@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.11"
+VERSAO = "0.6.0"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1519,23 +1519,57 @@ def contar(con, sql, data_base):
 CLASSIFICACAO_COLS = ("fonte", "programa", "finalidade", "recursos", "beneficiario", "linha")
 
 
+def _case_de(sql, col):
+    """Trechos (início, fim) de cada CASE ... END AS col do texto."""
+    out = []
+    for m in re.finditer(rf"(?i)\bEND\s+(?:AS\s+)?{col}\b", sql):
+        nivel = 0
+        for t in reversed(list(re.finditer(r"(?i)\b(CASE|END)\b", sql[:m.start() + 3]))):
+            nivel += 1 if t.group(1).upper() == "END" else -1
+            if nivel == 0:
+                out.append((t.start(), m.start() + 3))
+                break
+    return out
+
+
+MARCA_BACEN = "# finalidade no padrão Bacen: 1 comercialização, 2 custeio, 3 investimento, 4 industrialização (menu 9)"
+
+
+def corrigir_finalidade(texto):
+    """Troca os rótulos do CASE da finalidade feito com 1 custeio, 2 investimento, 3 comercialização para o padrão
+    do Bacen (1 comercialização, 2 custeio, 3 investimento). Só uma vez: grava uma marca no início do arquivo."""
+    if MARCA_BACEN in texto:
+        return texto, 0
+    troca = {"custeio": "comercializacao", "investimento": "custeio", "comercializacao": "investimento"}
+    trechos = _case_de(texto, "finalidade")
+    for i, f in reversed(trechos):
+        texto = texto[:i] + re.sub(r"(?i)'(custeio|investimento|comercializacao)'",
+                                   lambda m: f"'{troca[m.group(1).lower()]}'", texto[i:f]) + texto[f:]
+    return (MARCA_BACEN + "\n" + texto if trechos else texto), len(trechos)
+
+
+def cmd_corrigir_finalidade():
+    texto = CONFIG_BANCO.read_text(encoding="utf-8")
+    novo, n = corrigir_finalidade(texto)
+    if not n:
+        sys.exit("nada a corrigir: já corrigido antes ou sem CASE ... END AS finalidade no " + CONFIG_BANCO.name)
+    CONFIG_BANCO.with_suffix(".ini.bak").write_text(texto, encoding="utf-8")
+    CONFIG_BANCO.write_text(novo, encoding="utf-8")
+    print(f"corrigi {n} CASE de finalidade em {CONFIG_BANCO.name} (cópia do anterior em {CONFIG_BANCO.stem}.ini.bak)."
+          "\nAgora rode a opção 6 para baixar de novo e a 3 para calcular.")
+
+
 def _com_original(sql, col):
     """Acrescenta ao SELECT o campo do banco que o CASE ... END AS col traduz, como orig_<col>. None se não achar."""
-    m = re.search(rf"(?i)\bEND\s+(?:AS\s+)?{col}\b", sql)
-    if not m:
+    trechos = _case_de(sql, col)
+    if not trechos:
         return None
-    nivel, i = 0, None
-    for t in reversed(list(re.finditer(r"(?i)\b(CASE|END)\b", sql[:m.start() + 3]))):
-        nivel += 1 if t.group(1).upper() == "END" else -1
-        if nivel == 0:
-            i = t.start()
-            break
-    if i is None:
-        return None
-    caso = sql[i:m.start() + 3]
+    i, f = trechos[0]
+    caso = sql[i:f]
+    fim = re.match(rf"(?i)END\s+(?:AS\s+)?{col}\b", sql[f - 3:]).end() + f - 3
     e = (re.match(r"(?is)CASE\s+WHEN\s+(.+?)\s*(?:=|<>|!=|>|<|\bIN\b|\bLIKE\b|\bIS\b|\bBETWEEN\b)", caso)
          or re.match(r"(?is)CASE\s+(.+?)\s+WHEN\b", caso))
-    return sql[:m.end()] + f", {e.group(1).strip()} AS orig_{col}" + sql[m.end():] if e else None
+    return sql[:fim] + f", {e.group(1).strip()} AS orig_{col}" + sql[fim:] if e else None
 
 
 def distribuicao(con, sql, data_base):
@@ -2145,6 +2179,14 @@ def autoteste():
           dist["recursos"] == [("controlados", 4)] and "saldo" not in dist and dist["finalidade <- campo original"][0] == ("(vazio) <- 2026-11-04", 1))
     sql_b = ("SELECT cod AS id, CASE WHEN cod = 'A' THEN 'RO' ELSE 'POUP' END AS fonte, CASE WHEN valor > 5 THEN "
              "'pronaf' END AS programa, CASE WHEN dia < '2026-11-04' THEN 'custeio' END AS finalidade, valor AS saldo FROM u")
+    ini = ("[operacoes]\nsql = SELECT CASE WHEN f IN ('1','01') THEN 'custeio' WHEN f IN ('2','02') THEN 'investimento' "
+           "WHEN f IN ('3','03') THEN 'comercializacao' WHEN f = '4' THEN 'industrializacao' END AS finalidade, "
+           "'custeio' AS outro FROM t\n")
+    novo, n = corrigir_finalidade(ini)
+    check("menu 9 troca só os rótulos do CASE da finalidade para o padrão Bacen, uma vez só",
+          n == 1 and "IN ('1','01') THEN 'comercializacao' WHEN f IN ('2','02') THEN 'custeio' WHEN f IN ('3','03') THEN "
+          "'investimento' WHEN f = '4' THEN 'industrializacao'" in novo and "'custeio' AS outro" in novo
+          and corrigir_finalidade(novo) == (novo, 0))
     check("diagnóstico bruto conta fonte x programa x finalidade pelos campos que o CASE traduz",
           ("A", 10.5, "2026-10-30", 1, 10.5) in bruto(con, sql_b, date(2026, 11, 2)))
     check("conferência conta linhas, ids, dias, saldo zero e duplicadas sem baixar os dados",
@@ -2174,7 +2216,8 @@ def menu():
     print(f"\nExigibilidade v{VERSAO}\n  1 autoteste\n  2 exemplo (dados inventados)\n  3 rodar com as entradas reais\n"
           "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)\n  6 extrair do banco do trabalho\n"
           "  7 conferir no banco: tamanho do saldos_diarios e classificação do operacoes (só contagens)\n"
-          "  8 operacoes pelos códigos do banco: fonte x programa x finalidade, sem o CASE")
+          "  8 operacoes pelos códigos do banco: fonte x programa x finalidade, sem o CASE\n"
+          "  9 corrigir a finalidade no consultas_banco.ini para o padrão Bacen (1 comerc., 2 custeio, 3 invest.)")
     e = input("Número: ").strip()
     if e == "1":
         return ["autoteste"]
@@ -2198,6 +2241,8 @@ def menu():
         return ["extrair", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
     if e == "7":
         return ["conferir", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
+    if e == "9":
+        return ["corrigir-finalidade"]
     if e == "8":
         return ["bruto", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
     sys.exit("opção inválida")
@@ -2224,6 +2269,7 @@ def main(argv=None):
     s.add_argument("--data-base", required=True)
     s = sub.add_parser("conferir")
     s.add_argument("--data-base", required=True)
+    sub.add_parser("corrigir-finalidade")
     s = sub.add_parser("bruto")
     s.add_argument("--data-base", required=True)
     s = sub.add_parser("estrutura")
@@ -2249,6 +2295,8 @@ def main(argv=None):
         cmd_extrair(a.data_base)
     elif a.cmd == "conferir":
         cmd_conferir(a.data_base)
+    elif a.cmd == "corrigir-finalidade":
+        cmd_corrigir_finalidade()
     elif a.cmd == "bruto":
         cmd_bruto(a.data_base)
     elif a.cmd == "estrutura":
