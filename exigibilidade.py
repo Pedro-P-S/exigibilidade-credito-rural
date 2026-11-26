@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.9"
+VERSAO = "0.5.10"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1555,6 +1555,9 @@ def distribuicao(con, sql, data_base):
                 f"GROUP BY {col}, orig_{col} ORDER BY 1, 3 DESC").fetchall()]
         except Exception:  # CASE em formato que não reconheço: fica só a contagem da coluna
             con.rollback()
+    if {"fonte", "programa", "finalidade", "saldo"} <= set(cols):
+        out["saldo"] = _executar(cur, sql, data_base, "SELECT fonte, programa, finalidade, COUNT(*), SUM(saldo) FROM ({}) q "
+                                 "GROUP BY fonte, programa, finalidade ORDER BY 5 DESC").fetchall()
     return out
 
 
@@ -1578,9 +1581,16 @@ def cmd_conferir(data_base):
     print(f"máximo esperado (ids x dias): {r['ids'] * r['dias']:.0f}")
     print(f"linhas com saldo zero: {r['saldo_zero']:.0f} (o ideal é 0: dia sem linha já conta zero)")
     print(f"linhas duplicadas por id e data: {r['linhas_duplicadas']:.0f} (o ideal é 0)")
-    for col, linhas in (dist if "operacoes" in consultas else {}).items():
+    dist = dist if "operacoes" in consultas else {}
+    saldos = dist.pop("saldo", [])
+    for col, linhas in dist.items():
         print(f"\noperacoes, {col}: " + "; ".join(f"{'(vazio)' if v in (None, '') else str(v).strip()} = {int(n)}"
                                                   for v, n in linhas[:80]))
+    if saldos:
+        print("\nSaldo na data-base por fonte/programa/finalidade (para você comparar com o Sisex; não precisa me mandar):")
+        for f, pg, fi, n, v in saldos:
+            print(f"  {f or '-'}/{pg or '-'}/{fi or '-'}: {int(n)} operações, R$ {v or 0:,.2f}".replace(",", "X")
+                  .replace(".", ",").replace("X", "."))
     return r
 
 
@@ -2099,7 +2109,7 @@ def autoteste():
               "'controlados' AS recursos FROM u")
     dist = distribuicao(con, sql_op, date(2026, 11, 2))
     check("conferência mostra a classificação e, onde a finalidade sai vazia, o campo original do CASE",
-          dist["recursos"] == [("controlados", 4)] and dist["finalidade <- campo original"][0] == ("(vazio) <- 2026-11-04", 1))
+          dist["recursos"] == [("controlados", 4)] and "saldo" not in dist and dist["finalidade <- campo original"][0] == ("(vazio) <- 2026-11-04", 1))
     check("conferência conta linhas, ids, dias, saldo zero e duplicadas sem baixar os dados",
           cnt == {"colunas": ["id", "data", "saldo"], "linhas": 3, "ids": 2, "dias": 2, "saldo_zero": 1,
                   "pares_duplicados": 1, "linhas_duplicadas": 1})
