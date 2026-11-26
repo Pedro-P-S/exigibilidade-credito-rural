@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-VERSAO = "0.5.10"
+VERSAO = "0.5.11"
 PASTA_SCRIPT = Path(__file__).resolve().parent
 SAIDAS = PASTA_SCRIPT / "saidas"
 
@@ -1561,6 +1561,39 @@ def distribuicao(con, sql, data_base):
     return out
 
 
+def bruto(con, sql, data_base):
+    """Contagem e saldo por código do banco (antes do CASE) de fonte x programa x finalidade. None se não achar os CASE."""
+    for col in ("fonte", "programa", "finalidade"):
+        sql = sql if f"orig_{col}" in sql.lower() else _com_original(sql, col)
+        if not sql:
+            return None
+    return _executar(con.cursor(), sql, data_base, "SELECT orig_fonte, orig_programa, orig_finalidade, COUNT(*), SUM(saldo) "
+                     "FROM ({}) q GROUP BY orig_fonte, orig_programa, orig_finalidade ORDER BY 1, 2, 3").fetchall()
+
+
+def cmd_bruto(data_base):
+    texto, consultas = ler_config_banco(CONFIG_BANCO)
+    if "operacoes" not in consultas:
+        sys.exit(f"preencha [operacoes] em {CONFIG_BANCO}")
+    checar_sql(consultas["operacoes"])
+    con = conectar_banco(texto)
+    print("contando o operacoes pelos códigos do banco, sem o CASE...", flush=True)
+    try:
+        r = bruto(con, consultas["operacoes"], dt(data_base))
+    finally:
+        con.rollback()
+        con.close()
+    if r is None:
+        sys.exit("não achei o CASE de fonte, programa ou finalidade no SQL do operacoes")
+    print("\nfonte / programa / finalidade (códigos do banco): operações")
+    for f, pg, fi, n, _ in r:
+        print(f"  {f} / {pg} / {fi}: {int(n)}")
+    print("\nSaldo (só para você comparar com o Sisex; não precisa me mandar):")
+    for f, pg, fi, _, v in r:
+        print(f"  {f} / {pg} / {fi}: R$ {v or 0:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    return r
+
+
 def cmd_conferir(data_base):
     texto, consultas = ler_config_banco(CONFIG_BANCO)
     if "saldos_diarios" not in consultas:
@@ -2110,6 +2143,10 @@ def autoteste():
     dist = distribuicao(con, sql_op, date(2026, 11, 2))
     check("conferência mostra a classificação e, onde a finalidade sai vazia, o campo original do CASE",
           dist["recursos"] == [("controlados", 4)] and "saldo" not in dist and dist["finalidade <- campo original"][0] == ("(vazio) <- 2026-11-04", 1))
+    sql_b = ("SELECT cod AS id, CASE WHEN cod = 'A' THEN 'RO' ELSE 'POUP' END AS fonte, CASE WHEN valor > 5 THEN "
+             "'pronaf' END AS programa, CASE WHEN dia < '2026-11-04' THEN 'custeio' END AS finalidade, valor AS saldo FROM u")
+    check("diagnóstico bruto conta fonte x programa x finalidade pelos campos que o CASE traduz",
+          ("A", 10.5, "2026-10-30", 1, 10.5) in bruto(con, sql_b, date(2026, 11, 2)))
     check("conferência conta linhas, ids, dias, saldo zero e duplicadas sem baixar os dados",
           cnt == {"colunas": ["id", "data", "saldo"], "linhas": 3, "ids": 2, "dias": 2, "saldo_zero": 1,
                   "pares_duplicados": 1, "linhas_duplicadas": 1})
@@ -2136,7 +2173,8 @@ def autoteste():
 def menu():
     print(f"\nExigibilidade v{VERSAO}\n  1 autoteste\n  2 exemplo (dados inventados)\n  3 rodar com as entradas reais\n"
           "  4 comparar duas rodadas\n  5 estrutura da projeção atual (sem valores)\n  6 extrair do banco do trabalho\n"
-          "  7 conferir no banco: tamanho do saldos_diarios e classificação do operacoes (só contagens)")
+          "  7 conferir no banco: tamanho do saldos_diarios e classificação do operacoes (só contagens)\n"
+          "  8 operacoes pelos códigos do banco: fonte x programa x finalidade, sem o CASE")
     e = input("Número: ").strip()
     if e == "1":
         return ["autoteste"]
@@ -2160,6 +2198,8 @@ def menu():
         return ["extrair", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
     if e == "7":
         return ["conferir", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
+    if e == "8":
+        return ["bruto", "--data-base", input("Data-base AAAA-MM-DD: ").strip()]
     sys.exit("opção inválida")
 
 
@@ -2184,6 +2224,8 @@ def main(argv=None):
     s.add_argument("--data-base", required=True)
     s = sub.add_parser("conferir")
     s.add_argument("--data-base", required=True)
+    s = sub.add_parser("bruto")
+    s.add_argument("--data-base", required=True)
     s = sub.add_parser("estrutura")
     s.add_argument("caminhos", nargs="+")
     s.add_argument("--mascarar", default="")
@@ -2207,6 +2249,8 @@ def main(argv=None):
         cmd_extrair(a.data_base)
     elif a.cmd == "conferir":
         cmd_conferir(a.data_base)
+    elif a.cmd == "bruto":
+        cmd_bruto(a.data_base)
     elif a.cmd == "estrutura":
         cmd_estrutura(a.caminhos, a.mascarar)
     return 0
